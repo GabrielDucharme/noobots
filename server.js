@@ -1,10 +1,21 @@
 const { WebSocketServer } = require('ws');
+const http = require('http');
 const si = require('systeminformation');
 
-// Create WebSocket server
-const wss = new WebSocketServer({ port: 3001 });
+// Create HTTP server
+const server = http.createServer((req, res) => {
+    res.writeHead(200);
+    res.end('WebSocket server is running');
+});
 
-console.log('WebSocket server started on port 3001');
+// Create WebSocket server attached to HTTP server
+const wss = new WebSocketServer({ server });
+
+// Start server
+const PORT = 3001;
+server.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+});
 
 // Track system stats interval
 let statsInterval;
