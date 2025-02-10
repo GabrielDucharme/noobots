@@ -12,21 +12,29 @@ export async function GET(req) {
 
         if (!wss) {
             wss = new WebSocketServer({ noServer: true });
-
             wss.on('connection', handleConnection);
         }
 
-        const { socket, response } = Deno.upgradeWebSocket(req);
-        wss.handleUpgrade(req, socket, Buffer.from([]), (ws) => {
-            wss.emit('connection', ws);
-        });
+        // Use standard ws library upgrade handling.
+        const upgradeHeader = req.headers.get('upgrade');
+        if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
+            return new Promise((resolve) => {
+                wss.handleUpgrade(req, req.socket, Buffer.from([]), (ws) => {
+                    wss.emit('connection', ws);
+                    resolve(new Response(null, { status: 101, webSocket: ws }));
+                });
+            });
+        } else {
+            return new Response('Expected websocket', { status: 400 });
+        }
 
-        return response;
     } catch (err) {
         console.error('WebSocket error:', err);
         return new Response('WebSocket error', { status: 500 });
     }
 }
+
+// --- (Rest of the file: handleConnection, getSystemStats, handleCommand -  these functions stay the same) ---
 
 let statsInterval;
 
@@ -121,4 +129,4 @@ async function handleCommand(ws, command) {
         default:
             console.log('Unknown command:', command);
     }
-} 
+}
