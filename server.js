@@ -22,27 +22,46 @@ let statsInterval;
 
 async function getSystemStats() {
     try {
+        const platform = process.platform;
         const [cpu, memory, temp] = await Promise.all([
             si.currentLoad(),
             si.mem(),
             si.cpuTemperature()
         ]);
 
+        // Raspberry Pi (linux) will show actual temperature
+        // macOS will show 'Not available'
+        const temperature = platform === 'linux'
+            ? (temp.main || 'N/A')
+            : 'Not available on ' + platform;
+
         return {
             type: 'systemStats',
             data: {
                 cpuLoad: cpu.currentLoad.toFixed(1),
                 memoryUsed: ((memory.used / memory.total) * 100).toFixed(1),
-                temperature: temp.main || 'N/A'
+                temperature: temperature,
+                isRaspberryPi: platform === 'linux'
             }
         };
     } catch (error) {
         console.error('Error getting system stats:', error);
-        return null;
+        return {
+            type: 'systemStats',
+            data: {
+                cpuLoad: 'N/A',
+                memoryUsed: 'N/A',
+                temperature: 'N/A',
+                isRaspberryPi: process.platform === 'linux',
+                error: error.message
+            }
+        };
     }
 }
 
 async function handleCommand(ws, command) {
+    console.log('Command type:', command.type, 'Type of:', typeof command.type);
+
     switch (command.type) {
         case 'startStatsMonitoring':
             if (!statsInterval) {
@@ -73,6 +92,25 @@ async function handleCommand(ws, command) {
             ws.send(JSON.stringify({
                 type: 'status',
                 message: 'Shutdown command received'
+            }));
+            break;
+
+        case 'partyMode':
+            console.log('Entering party mode case');  // Debug log
+            const partyArt = `
+         ______________
+       /              \\
+     /~~~~~~~~~~~~~~~~~~\\
+    |   BAR    MIX    |
+     \\~~~~~~~~~~~~~~~~~~/
+       \\______________/
+   PARTY MODE ACTIVATED!
+   UN GROS BAR MIX !
+            `;
+            console.log(partyArt);
+            ws.send(JSON.stringify({
+                type: 'status',
+                message: 'Party mode activated! Enjoy the hot dogs and the good vibes! 🌭🎉'
             }));
             break;
 
