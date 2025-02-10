@@ -90,6 +90,8 @@ function handleConnection(ws) {
 }
 
 async function handleCommand(ws, command) {
+    console.log('Command type:', command.type, 'Type of:', typeof command.type);
+
     switch (command.type) {
         case 'getStats':
             const stats = await getSystemStats();
@@ -127,21 +129,23 @@ async function handleCommand(ws, command) {
             break;
 
         case 'partyMode':
+            console.log('Entering party mode case');  // Debug log
             const partyArt = `
          ______________
        /              \\
      /~~~~~~~~~~~~~~~~~~\\
-    |   HOT     DOG    |
+    |   BAR    MIX    |
      \\~~~~~~~~~~~~~~~~~~/
        \\______________/
    PARTY MODE ACTIVATED!
-   Let the good vibes roll and the fun begin!
+   UN GROS BAR MIX !
             `;
             console.log(partyArt);
             ws.send(JSON.stringify({ type: 'status', message: 'Party mode activated! Enjoy the hot dogs and the good vibes! 🌭🎉' }));
             break;
 
         default:
+            console.log('Unknown command type:', command.type, 'Type of:', typeof command.type);  // Debug log
             console.log('Unknown command:', command);
     }
 }
