@@ -162,6 +162,14 @@ export default function Home() {
                 </svg>
                 Arrêter
               </button>
+              <button
+                onClick={() => handleCommand('partyMode')}
+                className="flex items-center justify-center gap-2 px-4 py-3 bg-pink-500 hover:bg-pink-600 text-white font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={!isConnected}
+              >
+                <span role="img" aria-label="party mode">🎉</span>
+                Party Mode
+              </button>
             </div>
           </div>
         </div>

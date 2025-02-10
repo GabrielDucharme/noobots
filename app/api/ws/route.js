@@ -126,6 +126,21 @@ async function handleCommand(ws, command) {
             // In production, you would add actual shutdown command here
             break;
 
+        case 'partyMode':
+            const partyArt = `
+         ______________
+       /              \\
+     /~~~~~~~~~~~~~~~~~~\\
+    |   HOT     DOG    |
+     \\~~~~~~~~~~~~~~~~~~/
+       \\______________/
+   PARTY MODE ACTIVATED!
+   Let the good vibes roll and the fun begin!
+            `;
+            console.log(partyArt);
+            ws.send(JSON.stringify({ type: 'status', message: 'Party mode activated! Enjoy the hot dogs and the good vibes! 🌭🎉' }));
+            break;
+
         default:
             console.log('Unknown command:', command);
     }
