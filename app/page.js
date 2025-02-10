@@ -1,11 +1,24 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import useWebSocket from './hooks/useWebSocket';
+import DebugPanel from './components/DebugPanel';
 
 export default function Home() {
-  const { isConnected, systemStats, statusMessage, sendCommand } = useWebSocket();
+  const { isConnected, systemStats, statusMessage, sendCommand, wsUrl } = useWebSocket();
   const [isHelpModalOpen, setIsHelpModalOpen] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
+
+  // Add debug toggle keyboard shortcut
+  useEffect(() => {
+    const handleKeyPress = (e) => {
+      if (e.ctrlKey && e.key === 'd') {
+        setShowDebug(prev => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyPress);
+    return () => window.removeEventListener('keydown', handleKeyPress);
+  }, []);
 
   const handleCommand = (command) => {
     sendCommand({ type: command });
@@ -277,6 +290,14 @@ export default function Home() {
               </div>
             </div>
           </div>
+        )}
+
+        {showDebug && (
+          <DebugPanel
+            wsStatus={isConnected}
+            lastMessage={statusMessage}
+            wsUrl={wsUrl}
+          />
         )}
       </div>
     </div>

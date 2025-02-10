@@ -17,8 +17,20 @@ const useWebSocket = () => {
 
     const connect = useCallback(() => {
         try {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws`);
+            // Get WebSocket URL from environment or fallback to auto-detection
+            let wsUrl;
+            if (process.env.NEXT_PUBLIC_WS_URL) {
+                wsUrl = process.env.NEXT_PUBLIC_WS_URL;
+            } else {
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const host = window.location.host;
+                wsUrl = `${protocol}//${host}/api/ws`;
+            }
+
+            // Add connection debug info to UI
+            setStatusMessage(`Attempting to connect to: ${wsUrl}`);
+
+            const ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
                 console.log('Connected to WebSocket');
@@ -67,7 +79,7 @@ const useWebSocket = () => {
             return ws;
         } catch (error) {
             console.error('Error creating WebSocket:', error);
-            setStatusMessage('Failed to create WebSocket connection');
+            setStatusMessage(`Failed to create WebSocket connection: ${error.message}`);
             return null;
         }
     }, []);
