@@ -40,23 +40,40 @@ let statsInterval;
 
 async function getSystemStats() {
     try {
+        const platform = process.platform;
         const [cpu, memory, temp] = await Promise.all([
             si.currentLoad(),
             si.mem(),
             si.cpuTemperature()
         ]);
 
+        // Raspberry Pi (linux) will show actual temperature
+        // macOS will show 'Not available'
+        const temperature = platform === 'linux'
+            ? (temp.main || 'N/A')
+            : 'Not available on ' + platform;
+
         return {
             type: 'systemStats',
             data: {
                 cpuLoad: cpu.currentLoad.toFixed(1),
                 memoryUsed: ((memory.used / memory.total) * 100).toFixed(1),
-                temperature: temp.main || 'N/A'
+                temperature: temperature,
+                isRaspberryPi: platform === 'linux'
             }
         };
     } catch (error) {
         console.error('Error getting system stats:', error);
-        return null;
+        return {
+            type: 'systemStats',
+            data: {
+                cpuLoad: 'N/A',
+                memoryUsed: 'N/A',
+                temperature: 'N/A',
+                isRaspberryPi: process.platform === 'linux',
+                error: error.message
+            }
+        };
     }
 }
 
