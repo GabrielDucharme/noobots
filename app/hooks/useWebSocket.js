@@ -23,8 +23,8 @@ const useWebSocket = () => {
                 wsUrl = process.env.NEXT_PUBLIC_WS_URL;
             } else {
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const host = window.location.host;
-                wsUrl = `${protocol}//${host}/api/ws`;
+                const host = window.location.hostname;
+                wsUrl = `${protocol}//${host}:3001`;
             }
 
             // Add connection debug info to UI

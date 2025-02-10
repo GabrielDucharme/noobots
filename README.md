@@ -91,7 +91,7 @@ npm run server
 Once the server is running, open your browser and navigate to:
 
 ```
-http://<your-raspberry-pi-ip>:3000
+http://<your-raspberry-pi-ip>:3001
 ```
 
 This page shows the web interface where you can monitor system metrics (like CPU load, memory usage, and temperature) and issue commands (e.g., reboot or shutdown) to your Raspberry Pi.
