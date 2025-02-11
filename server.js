@@ -110,7 +110,7 @@ async function handleCommand(ws, command) {
             console.log(partyArt);
             ws.send(JSON.stringify({
                 type: 'status',
-                message: 'Party mode activated! Enjoy the hot dogs and the good vibes! 🌭🎉'
+                message: 'Party mode activé! MANGE UN ROTEUX OU DEUX 🌭🎉'
             }));
             break;
 
