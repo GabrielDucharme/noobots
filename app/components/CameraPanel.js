@@ -7,7 +7,14 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
     const [isCameraActive, setIsCameraActive] = useState(false);
     const [streamUrl, setStreamUrl] = useState('');
     const [isLoading, setIsLoading] = useState(true);
+    const [refreshKey, setRefreshKey] = useState(Date.now());
     const videoRef = useRef(null);
+    
+    // Function to force refresh the camera stream
+    const refreshStream = () => {
+        console.log('Manually refreshing camera stream');
+        setRefreshKey(Date.now());
+    };
 
     useEffect(() => {
         if (isConnected) {
@@ -18,17 +25,33 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
             if (serverHost) {
                 // Extract host and protocol from WebSocket URL
                 let host = serverHost;
-                if (host.startsWith('ws://')) {
-                    host = host.replace('ws://', 'http://');
-                } else if (host.startsWith('wss://')) {
-                    host = host.replace('wss://', 'https://');
+                
+                // Handle ngrok URLs properly
+                if (host.includes('ngrok')) {
+                    // If using ngrok, keep the full URL path
+                    if (host.startsWith('ws://')) {
+                        host = host.replace('ws://', 'http://');
+                    } else if (host.startsWith('wss://')) {
+                        host = host.replace('wss://', 'https://');
+                    }
+                    // Use the same ngrok domain but different endpoint
+                    setStreamUrl(`${host}/camera/stream`);
+                } else {
+                    // Normal handling for direct connections
+                    if (host.startsWith('ws://')) {
+                        host = host.replace('ws://', 'http://');
+                    } else if (host.startsWith('wss://')) {
+                        host = host.replace('wss://', 'https://');
+                    }
+                    
+                    // Remove any path and just keep the host:port
+                    const urlParts = host.split('/');
+                    const baseUrl = urlParts[0];
+                    
+                    setStreamUrl(`${baseUrl}/camera/stream`);
                 }
                 
-                // Remove any path and just keep the host:port
-                const urlParts = host.split('/');
-                const baseUrl = urlParts[0];
-                
-                setStreamUrl(`${baseUrl}/camera/stream`);
+                console.log('Camera stream URL set to:', streamUrl);
             }
         } else {
             setIsCameraAvailable(false);
@@ -38,10 +61,27 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
 
     // Function to handle camera status updates
     const handleCameraMessage = (message) => {
+        console.log('Camera message received:', message);
         if (message.type === 'cameraStatus') {
             setIsCameraAvailable(message.available);
             setIsCameraActive(message.active);
             setIsLoading(false);
+            
+            // Reload stream URL when camera becomes active
+            if (message.active && serverHost) {
+                const host = serverHost.startsWith('ws://') 
+                    ? serverHost.replace('ws://', 'http://') 
+                    : serverHost.replace('wss://', 'https://');
+                
+                if (host.includes('ngrok')) {
+                    setStreamUrl(`${host}/camera/stream?t=${Date.now()}`);
+                } else {
+                    const baseUrl = host.split('/')[0];
+                    setStreamUrl(`${baseUrl}/camera/stream?t=${Date.now()}`);
+                }
+                
+                console.log('Stream URL updated:', streamUrl);
+            }
         }
     };
 
@@ -102,12 +142,24 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                 <>
                     <div className="bg-gray-900 rounded-lg overflow-hidden mb-4 relative" style={{ minHeight: '240px' }}>
                         {isCameraActive ? (
-                            <img 
-                                src={streamUrl} 
-                                className="w-full h-auto" 
-                                alt="Camera stream"
-                                onError={() => console.error('Failed to load camera stream')}
-                            />
+                            <>
+                                <img 
+                                    key={`camera-stream-${refreshKey}`} // Force re-render with changing key
+                                    src={`${streamUrl}?t=${refreshKey}`} // Add timestamp to prevent caching
+                                    className="w-full h-auto" 
+                                    alt="Camera stream"
+                                    onError={(e) => {
+                                        console.error('Failed to load camera stream:', e);
+                                        // Try to reload the image after a short delay
+                                        setTimeout(() => {
+                                            e.target.src = `${streamUrl}?t=${Date.now()}`;
+                                        }, 1000);
+                                    }}
+                                />
+                                <div className="absolute bottom-2 right-2 bg-black bg-opacity-50 px-2 py-1 rounded text-xs text-white">
+                                    Tip: If stream is not visible, try refreshing
+                                </div>
+                            </>
                         ) : (
                             <div className="flex justify-center items-center h-48 text-gray-500">
                                 <p>Caméra inactive</p>
@@ -115,7 +167,7 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                         )}
                     </div>
                     
-                    <div className="flex justify-center">
+                    <div className="flex justify-center gap-3">
                         <button
                             onClick={toggleCamera}
                             className={`flex items-center justify-center gap-2 px-4 py-3 ${
@@ -143,6 +195,19 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                                 </>
                             )}
                         </button>
+                        
+                        {isCameraActive && (
+                            <button
+                                onClick={refreshStream}
+                                className="flex items-center justify-center gap-2 px-4 py-3 bg-blue-500 hover:bg-blue-600 text-white font-medium rounded-lg transition-colors"
+                                title="Rafraîchir le flux vidéo"
+                            >
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                </svg>
+                                Rafraîchir
+                            </button>
+                        )}
                     </div>
                 </>
             )}

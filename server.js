@@ -10,7 +10,11 @@ const util = require('util');
 
 // Create Express app
 const app = express();
-app.use(cors());
+app.use(cors({
+    origin: '*', // Allow all origins
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type']
+}));
 app.use(express.json());
 
 // Enhanced logging system
@@ -260,14 +264,62 @@ app.get('/camera/stream', (req, res) => {
     // Set appropriate headers for MJPEG stream
     res.writeHead(200, {
         'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
-        'Cache-Control': 'no-cache',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Expires': '0',
         'Connection': 'close',
-        'Pragma': 'no-cache'
+        'Pragma': 'no-cache',
+        'Access-Control-Allow-Origin': '*', // Allow cross-origin requests for ngrok
+        'Access-Control-Allow-Methods': 'GET',
+        'Access-Control-Allow-Headers': 'Content-Type'
     });
     
     // Start the camera if not already running
     if (!isCameraActive) {
         startCamera();
+    }
+    
+    // For some systems that don't support direct streaming via MJPEG,
+    // we'll use a fallback method to capture frames regularly
+    if (!cameraProcess || !cameraProcess.stdout) {
+        // Use child_process to take snapshots every few milliseconds
+        const captureFrame = () => {
+            const cmd = fs.existsSync('/usr/bin/libcamera-still') ? 'libcamera-still' : 'raspistill';
+            const frameProcess = spawn(cmd, [
+                '-n',               // No preview
+                '-t', '10',         // Minimal delay (ms)
+                '-o', '-',          // Output to stdout
+                '-w', '640',        // Width
+                '-h', '480',        // Height
+                '-q', '75'          // Quality (JPEG)
+            ]);
+            
+            let imageData = Buffer.alloc(0);
+            
+            frameProcess.stdout.on('data', (data) => {
+                imageData = Buffer.concat([imageData, data]);
+            });
+            
+            frameProcess.on('close', () => {
+                if (imageData.length > 0) {
+                    try {
+                        res.write('--frame\r\n');
+                        res.write('Content-Type: image/jpeg\r\n');
+                        res.write('Content-Length: ' + imageData.length + '\r\n\r\n');
+                        res.write(imageData);
+                        res.write('\r\n');
+                        
+                        setTimeout(captureFrame, 200); // Capture at ~5fps
+                    } catch (e) {
+                        console.error('Error writing frame to stream:', e);
+                    }
+                }
+            });
+        };
+        
+        captureFrame();
+    } else {
+        // Use the standard streaming method if available
+        cameraProcess.stdout.pipe(res);
     }
     
     // Handle connection close
@@ -286,20 +338,27 @@ function startCamera() {
         const useLibcamera = fs.existsSync('/usr/bin/libcamera-vid');
         
         if (useLibcamera) {
+            // Enhanced command for libcamera-vid with better V2 camera compatibility
             cameraProcess = spawn('libcamera-vid', [
-                '-t', '0',         // No timeout
-                '--width', '640',  // Width
-                '--height', '480', // Height
+                '-t', '0',          // No timeout
+                '--width', '640',   // Width
+                '--height', '480',  // Height
                 '--framerate', '24', // FPS
-                '-o', '-'          // Output to stdout
+                '--codec', 'mjpeg', // Use MJPEG codec for better browser compatibility
+                '--camera', '0',    // Use the first camera
+                '--nopreview',      // Don't show preview window
+                '-o', '-'           // Output to stdout
             ]);
         } else {
+            // Enhanced command for raspivid
             cameraProcess = spawn('raspivid', [
-                '-t', '0',         // No timeout
-                '-w', '640',       // Width
-                '-h', '480',       // Height
-                '-fps', '24',      // FPS
-                '-o', '-'          // Output to stdout
+                '-t', '0',          // No timeout
+                '-w', '640',        // Width
+                '-h', '480',        // Height
+                '-fps', '24',       // FPS
+                '-o', '-',          // Output to stdout
+                '-pf', 'MJPEG',     // Use MJPEG format
+                '-n'                // No preview window
             ]);
         }
         
