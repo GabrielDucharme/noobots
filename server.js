@@ -248,7 +248,7 @@ function checkIsRaspberryPi() {
     }
 }
 
-// Add a still image endpoint as fallback
+// Add a simple single frame endpoint
 app.get('/camera/snapshot', (req, res) => {
     isRaspberryPi = checkIsRaspberryPi();
     
@@ -256,53 +256,216 @@ app.get('/camera/snapshot', (req, res) => {
         return res.status(404).send('Camera functionality only available on Raspberry Pi');
     }
     
-    // Determine which camera command to use
+    // Set CORS headers first
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    
+    console.log('Taking simple camera snapshot...');
+    
+    // Determine which camera command to use - prioritize raspistill for guaranteed JPEG output
+    const useRaspistill = fs.existsSync('/usr/bin/raspistill');
     const useLibcamera = fs.existsSync('/usr/bin/libcamera-still');
+    
     let cmd, args;
     
-    if (useLibcamera) {
-        cmd = 'libcamera-still';
-        args = ['-n', '-t', '100', '-o', '-', '--width', '640', '--height', '480'];
-    } else {
+    if (useRaspistill) {
+        console.log('Using raspistill for snapshot (guaranteed JPEG format)');
         cmd = 'raspistill';
-        args = ['-n', '-t', '100', '-o', '-', '-w', '640', '-h', '480'];
+        args = [
+            '-n',             // No preview
+            '-t', '200',      // Very quick warmup time - we want immediate feedback
+            '-o', '-',        // Output to stdout
+            '-w', '320',      // Smaller width for faster capture
+            '-h', '240',      // Smaller height for faster capture
+            '-e', 'jpg',      // Explicitly specify JPEG format
+            '-q', '80'        // Medium quality for speed
+        ];
+    } else if (useLibcamera) {
+        console.log('Using libcamera-still for snapshot');
+        cmd = 'libcamera-still';
+        args = [
+            '-n',              // No preview
+            '-t', '200',       // Quick warmup time in ms
+            '-o', '-',         // Output to stdout
+            '--width', '320',  // Smaller width
+            '--height', '240', // Smaller height
+            '--immediate',     // Don't wait for auto exposure
+            '--encoding', 'jpg' // Explicitly request JPEG format
+        ];
+    } else {
+        console.error('No camera tools found for taking snapshots');
+        return res.status(500).send('No camera tools available');
     }
     
     // Take a picture
-    const stillProcess = spawn(cmd, args);
-    let imageData = Buffer.alloc(0);
-    
-    stillProcess.stdout.on('data', (data) => {
-        imageData = Buffer.concat([imageData, data]);
-    });
-    
-    stillProcess.on('error', (err) => {
-        console.error('Error taking snapshot:', err);
-        res.status(500).send('Error capturing image');
-    });
-    
-    stillProcess.on('close', (code) => {
-        if (code !== 0) {
-            console.error(`Snapshot process exited with code ${code}`);
-            return res.status(500).send('Error capturing image');
-        }
+    try {
+        const stillProcess = spawn(cmd, args);
+        let imageData = Buffer.alloc(0);
+        let stderrOutput = '';
         
-        if (imageData.length > 0) {
-            res.writeHead(200, {
-                'Content-Type': 'image/jpeg',
-                'Content-Length': imageData.length,
-                'Cache-Control': 'no-cache',
-                'Access-Control-Allow-Origin': '*'
+        stillProcess.stdout.on('data', (data) => {
+            imageData = Buffer.concat([imageData, data]);
+        });
+        
+        stillProcess.stderr.on('data', (data) => {
+            stderrOutput += data.toString();
+        });
+        
+        stillProcess.on('error', (err) => {
+            console.error('Error taking snapshot:', err);
+            return res.status(500).json({
+                error: 'Error capturing image', 
+                details: err.message
             });
-            res.end(imageData);
-        } else {
-            res.status(500).send('No image data received from camera');
-        }
-    });
+        });
+        
+        stillProcess.on('close', (code) => {
+            if (code !== 0) {
+                console.error(`Snapshot process exited with code ${code}`, stderrOutput);
+                return res.status(500).json({
+                    error: 'Error capturing image',
+                    code: code,
+                    stderr: stderrOutput
+                });
+            }
+            
+            if (imageData.length > 0) {
+                console.log(`Snapshot captured successfully: ${imageData.length} bytes`);
+                
+                // Check if it's a valid JPEG (starts with JPEG magic bytes FF D8)
+                if (imageData[0] === 0xFF && imageData[1] === 0xD8) {
+                    console.log('Valid JPEG format detected - first 20 bytes:', imageData.slice(0, 20).toString('hex'));
+                    
+                    res.writeHead(200, {
+                        'Content-Type': 'image/jpeg',
+                        'Content-Length': imageData.length,
+                        'Cache-Control': 'no-cache, no-store, must-revalidate',
+                        'Pragma': 'no-cache',
+                        'Expires': '0'
+                    });
+                    res.end(imageData);
+                    
+                    // Log timestamp to measure client-server time
+                    console.log('JPEG sent at:', new Date().toISOString());
+                } else {
+                    // Not a JPEG - log what we actually got
+                    console.error('Invalid or non-JPEG data received');
+                    console.error('Data type check - first 32 bytes:', imageData.slice(0, 32).toString('hex'));
+                    
+                    // Try to determine if it's another image format
+                    let detectedFormat = 'unknown';
+                    
+                    // Check for PNG signature
+                    if (imageData[0] === 0x89 && imageData[1] === 0x50 && imageData[2] === 0x4E && imageData[3] === 0x47) {
+                        detectedFormat = 'image/png';
+                    } 
+                    // Check for GIF signature
+                    else if (imageData[0] === 0x47 && imageData[1] === 0x49 && imageData[2] === 0x46) {
+                        detectedFormat = 'image/gif';
+                    }
+                    // Check for BMP signature
+                    else if (imageData[0] === 0x42 && imageData[1] === 0x4D) {
+                        detectedFormat = 'image/bmp';
+                    }
+                    
+                    if (detectedFormat !== 'unknown') {
+                        console.log(`Detected format: ${detectedFormat}, sending as is`);
+                        res.writeHead(200, {
+                            'Content-Type': detectedFormat,
+                            'Content-Length': imageData.length,
+                            'Cache-Control': 'no-cache'
+                        });
+                        res.end(imageData);
+                    } else {
+                        // If unknown, return error info
+                        res.status(500).json({
+                            error: 'Invalid or unknown image format',
+                            dataStart: imageData.slice(0, 32).toString('hex'),
+                            dataLength: imageData.length
+                        });
+                    }
+                }
+            } else {
+                console.error('No image data received from camera');
+                res.status(500).json({
+                    error: 'No image data received from camera'
+                });
+            }
+        });
+        
+        // Set a timeout in case the process hangs
+        setTimeout(() => {
+            if (!res.headersSent) {
+                console.error('Snapshot timeout');
+                stillProcess.kill();
+                res.status(500).json({error: 'Snapshot timeout'});
+            }
+        }, 10000); // 10 second timeout
+        
+    } catch (err) {
+        console.error('Exception taking snapshot:', err);
+        res.status(500).json({
+            error: 'Exception capturing image', 
+            details: err.message
+        });
+    }
 });
 
 // Initialize camera status
 let isCameraActive = false;
+
+// Add a test image endpoint that always works (for debugging)
+app.get('/camera/test-image', (req, res) => {
+    // Create a simple image - red circle on black background
+    const width = 320;
+    const height = 240;
+    const radius = 80;
+    const centerX = width / 2;
+    const centerY = height / 2;
+    
+    // Create a Canvas to generate a test image
+    try {
+        // If Canvas is available, use it to generate a circle
+        const { createCanvas } = require('canvas');
+        const canvas = createCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+        
+        // Fill background
+        ctx.fillStyle = 'black';
+        ctx.fillRect(0, 0, width, height);
+        
+        // Draw circle
+        ctx.fillStyle = 'red';
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Add text
+        ctx.fillStyle = 'white';
+        ctx.font = '16px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Test Image', centerX, centerY);
+        ctx.fillText(new Date().toISOString(), centerX, centerY + 24);
+        
+        // Convert to JPEG
+        const buffer = canvas.toBuffer('image/jpeg');
+        
+        res.writeHead(200, {
+            'Content-Type': 'image/jpeg',
+            'Content-Length': buffer.length,
+            'Cache-Control': 'no-cache',
+            'Access-Control-Allow-Origin': '*'
+        });
+        res.end(buffer);
+    } catch (err) {
+        // If Canvas is not available, send a simple text response
+        console.error('Canvas module not available:', err.message);
+        res.setHeader('Content-Type', 'text/plain');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.status(200).send('Test image endpoint (Canvas module not available)');
+    }
+});
 
 // Setup camera routes
 app.get('/camera/status', (req, res) => {
@@ -328,6 +491,10 @@ app.post('/camera/control', (req, res) => {
     }
 });
 
+// Track active stream connections to manage resources
+let activeStreamConnections = 0;
+let streamWatchdogTimer = null;
+
 // Handle camera stream
 app.get('/camera/stream', (req, res) => {
     isRaspberryPi = checkIsRaspberryPi();
@@ -339,9 +506,10 @@ app.get('/camera/stream', (req, res) => {
     // Set appropriate headers for MJPEG stream
     res.writeHead(200, {
         'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
-        'Cache-Control': 'no-cache',
-        'Connection': 'close',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Connection': 'keep-alive',
         'Pragma': 'no-cache',
+        'Expires': '0',
         'Access-Control-Allow-Origin': '*'
     });
     
@@ -350,9 +518,58 @@ app.get('/camera/stream', (req, res) => {
         startCamera();
     }
     
+    // Increment active connections counter
+    activeStreamConnections++;
+    console.log(`New stream connection. Active connections: ${activeStreamConnections}`);
+    
     if (cameraProcess && cameraProcess.stdout) {
         console.log('Piping camera output to response');
-        cameraProcess.stdout.pipe(res);
+        
+        // Create a transform stream to throttle data if needed
+        const { Transform } = require('stream');
+        const throttleStream = new Transform({
+            transform(chunk, encoding, callback) {
+                // Pass through the data but with a slight delay if too many connections
+                if (activeStreamConnections > 3) {
+                    setTimeout(() => {
+                        this.push(chunk);
+                        callback();
+                    }, 100); // Add delay for multiple connections
+                } else {
+                    this.push(chunk);
+                    callback();
+                }
+            }
+        });
+        
+        // Set up error handling for the pipe
+        throttleStream.on('error', (err) => {
+            console.error('Error in stream transform:', err);
+            // Don't end response - let client reconnect
+        });
+        
+        // Pipe camera output through our transform stream to the response
+        cameraProcess.stdout
+            .pipe(throttleStream)
+            .pipe(res);
+            
+        // Set up the stream watchdog timer if not already running
+        if (!streamWatchdogTimer) {
+            streamWatchdogTimer = setInterval(() => {
+                if (isCameraActive && cameraProcess) {
+                    // Restart camera if it's been running for more than 5 minutes
+                    const uptime = (Date.now() - cameraProcess.startTime) / 1000;
+                    if (uptime > 300) { // 5 minutes
+                        console.log(`Camera has been running for ${uptime}s, restarting for freshness...`);
+                        stopCamera();
+                        setTimeout(startCamera, 1000);
+                    }
+                } else {
+                    clearInterval(streamWatchdogTimer);
+                    streamWatchdogTimer = null;
+                }
+            }, 60000); // Check every minute
+        }
     } else {
         console.error('Camera process not available');
         return res.status(500).send('Camera process not available');
@@ -360,15 +577,45 @@ app.get('/camera/stream', (req, res) => {
     
     // Handle connection close
     req.on('close', () => {
-        console.log('Stream connection closed');
+        // Decrement active connections counter
+        activeStreamConnections = Math.max(0, activeStreamConnections - 1);
+        console.log(`Stream connection closed. Active connections: ${activeStreamConnections}`);
+        
+        // If no active connections, consider stopping camera after a delay
+        if (activeStreamConnections === 0) {
+            setTimeout(() => {
+                if (activeStreamConnections === 0 && isCameraActive) {
+                    console.log('No active stream connections for 30 seconds, stopping camera');
+                    stopCamera();
+                }
+            }, 30000); // Wait 30 seconds before stopping
+        }
+    });
+    
+    // Set a timeout to avoid frozen connections
+    req.setTimeout(300000, () => { // 5 minutes
+        console.log('Stream connection timeout');
+        if (!res.writableEnded) {
+            res.end();
+        }
     });
 });
 
 function startCamera() {
     if (isCameraActive || !isRaspberryPi) return;
     
+    // Kill any existing camera processes to free resources
     try {
-        console.log('Starting camera stream...');
+        if (cameraProcess) {
+            cameraProcess.kill();
+            cameraProcess = null;
+        }
+    } catch (e) {
+        console.error('Error killing previous camera process:', e);
+    }
+    
+    try {
+        console.log('Starting camera stream with reduced settings for better stability...');
         
         // Detect available camera tools
         const hasLibcamera = fs.existsSync('/usr/bin/libcamera-vid');
@@ -379,31 +626,81 @@ function startCamera() {
             raspivid: hasRaspivid
         });
         
+        // Lower resolution and framerate to reduce resource usage
+        const width = 320;  // Lower resolution
+        const height = 240; // Lower resolution
+        const fps = 5;      // Lower framerate
+        
         if (hasLibcamera) {
-            // Simplified libcamera command
+            // Optimized libcamera command for resource efficiency
             cameraProcess = spawn('libcamera-vid', [
-                '-t', '0',         // No timeout
-                '--width', '640',  // Width
-                '--height', '480', // Height
-                '-o', '-'          // Output to stdout
+                '-t', '0',            // No timeout
+                '--width', width,     // Width
+                '--height', height,   // Height
+                '--framerate', fps,   // Lower framerate
+                '--inline',           // Enable inline headers for MJPEG
+                '--output', '-',      // Output to stdout
+                '--nopreview',        // Disable preview window
+                '--timeout', '0',     // Disable timeout
+                '--segment', '1',     // Split output to reduce buffer size
+                '--codec', 'mjpeg'    // Use MJPEG codec to reduce CPU usage
             ]);
+            
+            // Track when the camera process started
+            cameraProcess.startTime = Date.now();
         } else if (hasRaspivid) {
-            // Simplified raspivid command
+            // Optimized raspivid command for resource efficiency
             cameraProcess = spawn('raspivid', [
-                '-t', '0',         // No timeout
-                '-w', '640',       // Width
-                '-h', '480',       // Height
-                '-o', '-'          // Output to stdout
+                '-t', '0',            // No timeout
+                '-w', width,          // Width
+                '-h', height,         // Height
+                '-fps', fps,          // Lower framerate
+                '-pf', 'MJPEG',       // Use MJPEG format instead of H264
+                '-o', '-',            // Output to stdout
+                '-n',                 // No preview
+                '-fl',                // Flush buffers immediately
+                '-g', '15',           // I-frame every 15 frames (3 seconds)
+                '-b', '1000000'       // Limit bitrate to 1Mbps
             ]);
+            
+            // Track when the camera process started
+            cameraProcess.startTime = Date.now();
         } else {
             console.error('No camera tools found. Cannot start camera.');
             return;
+        }
+        
+        // Set up buffer handling to prevent memory issues
+        if (cameraProcess.stdout) {
+            cameraProcess.stdout.on('error', (err) => {
+                console.error('Camera stdout error:', err);
+                stopCamera();
+            });
         }
         
         // Log any stderr output from the camera process
         cameraProcess.stderr.on('data', (data) => {
             console.error('Camera process error:', data.toString());
         });
+        
+        // Set up automatic restart if camera freezes
+        const cameraWatchdog = setInterval(() => {
+            if (cameraProcess && isCameraActive) {
+                // Check if process is still responsive
+                try {
+                    if (cameraProcess.killed) {
+                        console.log('Camera process was killed, restarting...');
+                        clearInterval(cameraWatchdog);
+                        stopCamera();
+                        setTimeout(startCamera, 1000);
+                    }
+                } catch (e) {
+                    console.error('Error checking camera process:', e);
+                }
+            } else {
+                clearInterval(cameraWatchdog);
+            }
+        }, 10000); // Check every 10 seconds
         
         // Broadcast to all connected clients that camera is now active
         wss.clients.forEach(client => {

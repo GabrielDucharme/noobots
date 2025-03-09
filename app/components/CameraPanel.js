@@ -7,10 +7,19 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
     const [isCameraActive, setIsCameraActive] = useState(false);
     const [streamUrl, setStreamUrl] = useState('');
     const [snapshotUrl, setSnapshotUrl] = useState('');
+    const [testImageUrl, setTestImageUrl] = useState('');
     const [isLoading, setIsLoading] = useState(true);
     const [refreshKey, setRefreshKey] = useState(Date.now());
-    const [useStreamingMode, setUseStreamingMode] = useState(true);
+    
+    // Start with snapshot mode - not streaming - to simplify debugging
+    const [useStreamingMode, setUseStreamingMode] = useState(false);
+    
     const [streamError, setStreamError] = useState(false);
+    const [snapshotError, setSnapshotError] = useState(false);
+    const [useFallbackMode, setUseFallbackMode] = useState(false);
+    const [successfulImageLoads, setSuccessfulImageLoads] = useState(0);
+    const [lastImageSize, setLastImageSize] = useState({ width: 0, height: 0 });
+    const [debugInfo, setDebugInfo] = useState('No image loaded yet');
     const snapshotTimerRef = useRef(null);
     const videoRef = useRef(null);
     
@@ -62,11 +71,25 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                 
                 setStreamUrl(`${baseUrl}/camera/stream`);
                 setSnapshotUrl(`${baseUrl}/camera/snapshot`);
+                setTestImageUrl(`${baseUrl}/camera/test-image`);
                 
                 console.log('Camera URLs set:', {
                     stream: `${baseUrl}/camera/stream`,
-                    snapshot: `${baseUrl}/camera/snapshot`
+                    snapshot: `${baseUrl}/camera/snapshot`,
+                    testImage: `${baseUrl}/camera/test-image`
                 });
+                
+                // Try to load the test image to ensure connectivity
+                const testImg = new Image();
+                testImg.onload = () => {
+                    console.log('Test image loaded successfully');
+                    setUseFallbackMode(false);
+                };
+                testImg.onerror = () => {
+                    console.error('Test image failed to load, switching to fallback mode');
+                    setUseFallbackMode(true);
+                };
+                testImg.src = `${baseUrl}/camera/test-image?t=${Date.now()}`;
             }
         } else {
             setIsCameraAvailable(false);
@@ -88,18 +111,26 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
             setIsCameraActive(message.active);
             setIsLoading(false);
             
-            // Setup snapshot timer or clear it based on camera status
+            // Setup based on camera status
             if (message.active) {
-                // Force refresh the stream URLs with a cache-busting parameter
+                // Log that camera is active
+                console.log('CAMERA IS ACTIVE - Taking first snapshot...');
+                setDebugInfo(`Camera active at ${new Date().toLocaleTimeString()} - Taking snapshot...`);
+                
+                // Force refresh with a cache-busting parameter
                 setRefreshKey(Date.now());
                 setStreamError(false);
                 
-                // Set up snapshot timer for fallback mode
-                if (!useStreamingMode && !snapshotTimerRef.current) {
+                // We intentionally don't set up automatic snapshots initially
+                // Let's first see if we can get a single image properly displayed
+                // If we get successful images, then we can consider auto-refresh
+                
+                if (successfulImageLoads >= 3 && !useStreamingMode && !snapshotTimerRef.current) {
+                    console.log('Setting up auto-refresh after 3 successful loads');
                     snapshotTimerRef.current = setInterval(() => {
-                        // Force a new snapshot by updating the timestamp
                         setRefreshKey(Date.now());
-                    }, 2000); // Update every 2 seconds
+                        setDebugInfo(`Auto refresh at ${new Date().toLocaleTimeString()}`);
+                    }, 3000); // Update every 3 seconds
                 }
             } else {
                 // Clear snapshot timer when camera is inactive
@@ -205,44 +236,181 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                         {isCameraActive ? (
                             <>
                                 {useStreamingMode ? (
-                                    // Stream mode - continuous video
-                                    <img 
-                                        key={`camera-stream-${refreshKey}`} // Force re-render with changing key
-                                        src={`${streamUrl}?t=${refreshKey}`} // Add timestamp to prevent caching
-                                        className="w-full h-auto" 
-                                        alt="Camera stream"
-                                        onError={(e) => {
-                                            console.error('Failed to load camera stream:', e);
-                                            setStreamError(true);
-                                            // Automatically switch to snapshot mode after stream error
-                                            setUseStreamingMode(false);
-                                            
-                                            // Start snapshot timer if not already running
-                                            if (!snapshotTimerRef.current) {
-                                                snapshotTimerRef.current = setInterval(() => {
-                                                    setRefreshKey(Date.now());
-                                                }, 2000);
-                                            }
-                                        }}
-                                    />
+                                    // Stream mode with auto-recovery
+                                    <div className="relative">
+                                        <img 
+                                            key={`camera-stream-${refreshKey}`}
+                                            src={`${streamUrl}?t=${refreshKey}`}
+                                            className="w-full h-auto max-h-[400px] object-contain"
+                                            alt="Camera stream"
+                                            style={{ minHeight: '240px', background: '#1a1a1a' }}
+                                            onLoad={() => {
+                                                // Reset stream error state when stream loads successfully
+                                                if (streamError) {
+                                                    setStreamError(false);
+                                                }
+                                            }}
+                                            onError={(e) => {
+                                                console.error('Failed to load camera stream:', e);
+                                                setStreamError(true);
+                                                
+                                                // After three consecutive stream errors, switch to snapshot mode
+                                                if (streamError && successfulImageLoads === 0) {
+                                                    console.log('Multiple stream errors, switching to snapshot mode');
+                                                    setUseStreamingMode(false);
+                                                    
+                                                    // Start snapshot timer if not already running
+                                                    if (!snapshotTimerRef.current) {
+                                                        snapshotTimerRef.current = setInterval(() => {
+                                                            setRefreshKey(Date.now());
+                                                        }, 2000);
+                                                    }
+                                                } else {
+                                                    // Try to recover the stream with a new connection
+                                                    setTimeout(() => {
+                                                        if (useStreamingMode) {
+                                                            console.log('Attempting stream recovery...');
+                                                            setRefreshKey(Date.now());
+                                                        }
+                                                    }, 3000);
+                                                }
+                                            }}
+                                        />
+                                        
+                                        {/* Auto-recovery overlay */}
+                                        {streamError && (
+                                            <div className="absolute top-0 right-0 bg-black bg-opacity-70 px-2 py-1 text-xs text-yellow-300">
+                                                Récupération...
+                                            </div>
+                                        )}
+                                    </div>
                                 ) : (
-                                    // Snapshot mode - individual frames
-                                    <img 
-                                        key={`camera-snapshot-${refreshKey}`}
-                                        src={`${snapshotUrl}?t=${refreshKey}`}
-                                        className="w-full h-auto"
-                                        alt="Camera snapshot"
-                                        onError={(e) => {
-                                            console.error('Failed to load camera snapshot:', e);
-                                            // Try again with the next timer cycle
-                                        }}
-                                    />
+                                    // Choose between snapshot mode or fallback mode
+                                    <div className="relative" style={{ minHeight: '240px' }}>
+                                        {useFallbackMode ? (
+                                            // Fallback mode using test image if available
+                                            <img 
+                                                key={`camera-test-${refreshKey}`}
+                                                src={`${testImageUrl}?t=${refreshKey}`}
+                                                className="w-full h-auto max-h-[400px] object-contain" 
+                                                alt="Camera test"
+                                                style={{ background: '#1a1a1a' }}
+                                                onLoad={(e) => {
+                                                    const imgWidth = e.target.naturalWidth;
+                                                    const imgHeight = e.target.naturalHeight;
+                                                    console.log('Test image loaded successfully:', imgWidth, 'x', imgHeight);
+                                                    setLastImageSize({ width: imgWidth, height: imgHeight });
+                                                    setSuccessfulImageLoads(prev => prev + 1);
+                                                    setDebugInfo(`Test image: ${imgWidth}x${imgHeight} - loaded at ${new Date().toLocaleTimeString()}`);
+                                                }}
+                                                onError={(e) => {
+                                                    console.error('Failed to load test image');
+                                                    setDebugInfo(`Error loading test image at ${new Date().toLocaleTimeString()}`);
+                                                }}
+                                            />
+                                        ) : (
+                                            // Basic single snapshot mode with extensive debugging
+                                            <>
+                                                <img 
+                                                    key={`camera-snapshot-${refreshKey}`}
+                                                    src={`${snapshotUrl}?t=${refreshKey}`}
+                                                    className="w-full h-auto max-h-[400px] object-contain" 
+                                                    alt="Camera snapshot"
+                                                    style={{ background: '#1a1a1a' }}
+                                                    crossOrigin="anonymous"
+                                                    onLoad={(e) => {
+                                                        // Get image details
+                                                        const imgWidth = e.target.naturalWidth;
+                                                        const imgHeight = e.target.naturalHeight;
+                                                        console.log('SNAPSHOT LOADED SUCCESSFULLY:', imgWidth, 'x', imgHeight);
+                                                        
+                                                        // Store image size
+                                                        setLastImageSize({ width: imgWidth, height: imgHeight });
+                                                        setSuccessfulImageLoads(prev => prev + 1);
+                                                        setSnapshotError(false);
+                                                        
+                                                        // Update debug info
+                                                        setDebugInfo(`Success: ${imgWidth}x${imgHeight} - ${new Date().toLocaleTimeString()}`);
+                                                        
+                                                        // Make image visible if it was hidden
+                                                        e.target.style.display = 'block';
+                                                        
+                                                        // Hide error div if visible
+                                                        const errorDiv = document.getElementById('snapshot-error');
+                                                        if (errorDiv) {
+                                                            errorDiv.style.display = 'none';
+                                                        }
+                                                    }}
+                                                    onError={(e) => {
+                                                        console.error('Failed to load camera snapshot:', e);
+                                                        setSnapshotError(true);
+                                                        setDebugInfo(`Error loading snapshot at ${new Date().toLocaleTimeString()}`);
+                                                        
+                                                        // Try the test image instead after repeated failures
+                                                        if (snapshotError && successfulImageLoads === 0) {
+                                                            setUseFallbackMode(true);
+                                                        }
+                                                        
+                                                        // Display the error in the UI
+                                                        e.target.style.display = 'none';
+                                                        const errorDiv = document.getElementById('snapshot-error');
+                                                        if (errorDiv) {
+                                                            errorDiv.style.display = 'flex';
+                                                        }
+                                                    }}
+                                                />
+                                                {/* Debug overlay */}
+                                                <div className="absolute top-0 left-0 bg-black bg-opacity-70 px-2 py-1 m-2 text-xs text-green-300 z-10 rounded">
+                                                    {debugInfo}
+                                                </div>
+                                            </>
+                                        )}
+                                        <div 
+                                            id="snapshot-error"
+                                            className="absolute inset-0 flex flex-col items-center justify-center bg-gray-900 hidden"
+                                        >
+                                            <p className="text-red-500 text-center mb-2">Error loading camera image</p>
+                                            <p className="text-gray-400 text-sm text-center">
+                                                {debugInfo}
+                                            </p>
+                                            <div className="flex gap-2 mt-6">
+                                                <button
+                                                    onClick={() => {
+                                                        setRefreshKey(Date.now());
+                                                        setDebugInfo(`Manual refresh at ${new Date().toLocaleTimeString()}`);
+                                                    }}
+                                                    className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded text-sm"
+                                                >
+                                                    Try Again
+                                                </button>
+                                                <button
+                                                    onClick={() => setUseFallbackMode(!useFallbackMode)}
+                                                    className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded text-sm"
+                                                >
+                                                    {useFallbackMode ? "Try Camera" : "Use Test Image"}
+                                                </button>
+                                            </div>
+                                            <div className="mt-4 text-xs text-gray-500 text-center">
+                                                <p>Load attempts: {successfulImageLoads > 0 ? `${successfulImageLoads} successful` : "none successful"}</p>
+                                                <p>Last successful image: {lastImageSize.width > 0 ? `${lastImageSize.width}x${lastImageSize.height}` : "none"}</p>
+                                            </div>
+                                        </div>
+                                    </div>
                                 )}
                                 
                                 <div className="absolute bottom-2 right-2 bg-black bg-opacity-70 px-2 py-1 rounded text-xs text-white">
-                                    {useStreamingMode ? 'Mode: Stream' : 'Mode: Snapshots'} | 
+                                    {useStreamingMode ? 'Mode: Stream' : 
+                                     useFallbackMode ? 'Mode: Test Image' : 'Mode: Snapshots'} | 
                                     <button 
                                         onClick={() => {
+                                            // If in fallback mode, toggle between fallback and snapshot mode
+                                            if (!useStreamingMode && useFallbackMode) {
+                                                setUseFallbackMode(false);
+                                                setRefreshKey(Date.now());
+                                                return;
+                                            }
+                                            
+                                            // Otherwise toggle between stream and snapshot modes
                                             setUseStreamingMode(!useStreamingMode);
                                             setRefreshKey(Date.now());
                                             
@@ -264,6 +432,18 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                                     >
                                         Changer
                                     </button>
+                                    {!useStreamingMode && !useFallbackMode && (
+                                        <button 
+                                            onClick={() => {
+                                                setUseFallbackMode(true);
+                                                setRefreshKey(Date.now());
+                                            }}
+                                            className="ml-2 text-blue-300 underline"
+                                            title="Use test image if camera not working"
+                                        >
+                                            Test
+                                        </button>
+                                    )}
                                 </div>
                             </>
                         ) : (
@@ -273,7 +453,7 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                         )}
                     </div>
                     
-                    <div className="flex justify-center gap-3">
+                    <div className="flex justify-center flex-wrap gap-3">
                         <button
                             onClick={toggleCamera}
                             className={`flex items-center justify-center gap-2 px-4 py-3 ${
@@ -303,16 +483,42 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                         </button>
                         
                         {isCameraActive && (
-                            <button
-                                onClick={refreshStream}
-                                className="flex items-center justify-center gap-2 px-4 py-3 bg-blue-500 hover:bg-blue-600 text-white font-medium rounded-lg transition-colors"
-                                title="Rafraîchir le flux vidéo"
-                            >
-                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                                </svg>
-                                Rafraîchir
-                            </button>
+                            <>
+                                <button
+                                    onClick={() => {
+                                        setRefreshKey(Date.now());
+                                        setDebugInfo(`Manual snapshot at ${new Date().toLocaleTimeString()}`);
+                                    }}
+                                    className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-yellow-500 hover:bg-yellow-600 text-black font-medium rounded-lg transition-colors"
+                                >
+                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                                    </svg>
+                                    Prendre Photo
+                                </button>
+                                
+                                <button
+                                    onClick={() => {
+                                        if (snapshotTimerRef.current) {
+                                            clearInterval(snapshotTimerRef.current);
+                                            snapshotTimerRef.current = null;
+                                            setDebugInfo(`Auto refresh disabled at ${new Date().toLocaleTimeString()}`);
+                                        } else {
+                                            snapshotTimerRef.current = setInterval(() => {
+                                                setRefreshKey(Date.now());
+                                            }, 3000);
+                                            setDebugInfo(`Auto refresh enabled at ${new Date().toLocaleTimeString()}`);
+                                        }
+                                    }}
+                                    className={`flex items-center justify-center gap-2 px-4 py-3 ${snapshotTimerRef.current ? 'bg-red-500 hover:bg-red-600' : 'bg-blue-500 hover:bg-blue-600'} text-white font-medium rounded-lg transition-colors`}
+                                >
+                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                    </svg>
+                                    {snapshotTimerRef.current ? 'Arrêter Auto' : 'Démarrer Auto'}
+                                </button>
+                            </>
                         )}
                     </div>
                 </>
