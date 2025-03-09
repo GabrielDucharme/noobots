@@ -290,8 +290,8 @@ app.get('/camera/snapshot', (req, res) => {
             '-o', '-',         // Output to stdout
             '--width', '320',  // Smaller width
             '--height', '240', // Smaller height
-            '--immediate',     // Don't wait for auto exposure
-            '--encoding', 'jpg' // Explicitly request JPEG format
+            '--immediate'      // Don't wait for auto exposure
+            // Removed --encoding parameter to avoid timeout error
         ];
     } else {
         console.error('No camera tools found for taking snapshots');
@@ -634,14 +634,14 @@ function startCamera() {
         if (hasLibcamera) {
             // Optimized libcamera command for resource efficiency
             cameraProcess = spawn('libcamera-vid', [
-                '-t', '0',            // No timeout
+                '-t', '0',            // No timeout (this is the standard parameter)
                 '--width', width,     // Width
                 '--height', height,   // Height
                 '--framerate', fps,   // Lower framerate
                 '--inline',           // Enable inline headers for MJPEG
                 '--output', '-',      // Output to stdout
                 '--nopreview',        // Disable preview window
-                '--timeout', '0',     // Disable timeout
+                // Removed duplicate timeout parameter
                 '--segment', '1',     // Split output to reduce buffer size
                 '--codec', 'mjpeg'    // Use MJPEG codec to reduce CPU usage
             ]);
