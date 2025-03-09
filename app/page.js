@@ -3,11 +3,15 @@
 import { useState, useEffect } from 'react';
 import useWebSocket from './hooks/useWebSocket';
 import DebugPanel from './components/DebugPanel';
+import CameraPanel from './components/CameraPanel';
 
 export default function Home() {
-  const { isConnected, systemStats, statusMessage, sendCommand, wsUrl } = useWebSocket();
+  const { isConnected, systemStats, statusMessage, sendCommand, wsUrl, connect } = useWebSocket();
   const [isHelpModalOpen, setIsHelpModalOpen] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
+  const [customWsUrl, setCustomWsUrl] = useState('');
+  const [showConnectModal, setShowConnectModal] = useState(false);
+  const [confirmAction, setConfirmAction] = useState(null);
 
   // Add debug toggle keyboard shortcut
   useEffect(() => {
@@ -20,8 +24,33 @@ export default function Home() {
     return () => window.removeEventListener('keydown', handleKeyPress);
   }, []);
 
+  // Format uptime into human-readable format
+  const formatUptime = (seconds) => {
+    if (!seconds || isNaN(seconds)) return 'N/A';
+    
+    const days = Math.floor(seconds / (3600 * 24));
+    const hours = Math.floor((seconds % (3600 * 24)) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    
+    return `${days}j ${hours}h ${minutes}m`;
+  };
+
   const handleCommand = (command) => {
+    // For critical commands, show confirmation first
+    if (command === 'reboot' || command === 'shutdown') {
+      setConfirmAction(command);
+      return;
+    }
+    
     sendCommand({ type: command });
+  };
+  
+  const handleCustomConnection = (e) => {
+    e.preventDefault();
+    if (customWsUrl) {
+      connect(customWsUrl);
+      setShowConnectModal(false);
+    }
   };
 
   return (
@@ -43,7 +72,11 @@ export default function Home() {
           </h1>
           <p className="text-gray-400 mb-4">Interface de contrôle Raspberry Pi pour débutants</p>
           <div className="flex items-center justify-center gap-4">
-            <div className="flex items-center gap-2 bg-gray-800 rounded-full px-4 py-2">
+            <div 
+              className="flex items-center gap-2 bg-gray-800 rounded-full px-4 py-2 cursor-pointer hover:bg-gray-700"
+              onClick={() => setShowConnectModal(true)}
+              title="Configurer la connexion"
+            >
               <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
               <span className="text-sm font-medium">
                 {isConnected ? 'Connecté' : 'Déconnecté'}
@@ -52,6 +85,11 @@ export default function Home() {
             {statusMessage && (
               <span className="text-sm text-gray-400 bg-gray-800 rounded-full px-4 py-2">
                 {statusMessage}
+              </span>
+            )}
+            {systemStats.hostname && (
+              <span className="text-xs text-gray-400 bg-gray-800 rounded-full px-3 py-1 ml-2">
+                {systemStats.hostname}
               </span>
             )}
           </div>
@@ -67,6 +105,11 @@ export default function Home() {
                 </svg>
               </div>
               <h2 className="text-xl font-bold">Métriques système</h2>
+              {systemStats.model && (
+                <span className="text-xs bg-gray-700 rounded-full px-2 py-1 text-gray-300">
+                  {systemStats.model}
+                </span>
+              )}
             </div>
             <div className="space-y-6">
               <div>
@@ -107,6 +150,15 @@ export default function Home() {
                   />
                 </div>
               </div>
+              
+              {systemStats.uptime && (
+                <div className="pt-2 border-t border-gray-700">
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-400">Uptime</span>
+                    <span className="text-sm font-mono">{formatUptime(systemStats.uptime)}</span>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -172,6 +224,15 @@ export default function Home() {
               </button>
             </div>
           </div>
+        </div>
+
+        {/* Camera Panel */}
+        <div className="mt-6">
+          <CameraPanel 
+            isConnected={isConnected} 
+            sendCommand={sendCommand} 
+            serverHost={wsUrl} 
+          />
         </div>
 
         {/* Status Log */}
@@ -263,6 +324,27 @@ export default function Home() {
                   <p className="mt-2 text-sm text-gray-400">Remplacez 'adresse-ip-raspberry-pi' par l'adresse IP de votre Pi.</p>
                 </div>
 
+                <div>
+                  <h3 className="text-base sm:text-lg font-semibold mb-2 text-white flex items-center gap-2">
+                    <span className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full bg-blue-500 text-white text-sm">5</span>
+                    Accès à distance
+                  </h3>
+                  <ul className="list-none space-y-3 text-sm">
+                    <li className="flex items-start gap-2">
+                      <span className="text-blue-400 mt-1">•</span>
+                      <span>Configurez une redirection de port sur votre routeur (port 3001)</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="text-blue-400 mt-1">•</span>
+                      <span>Cliquez sur l'indicateur de connexion pour configurer l'URL du serveur</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="text-blue-400 mt-1">•</span>
+                      <span>Format de l'URL pour l'accès distant: ws://ADRESSE-IP-EXTERNE:3001</span>
+                    </li>
+                  </ul>
+                </div>
+
                 <div className="pb-2">
                   <h3 className="text-base sm:text-lg font-semibold mb-2 text-white flex items-center gap-2">
                     <svg className="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -295,6 +377,88 @@ export default function Home() {
                     </li>
                   </ul>
                 </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Connection Modal */}
+        {showConnectModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+            <div className="bg-gray-800 rounded-xl w-full max-w-md p-6 border border-gray-700 relative">
+              <button
+                onClick={() => setShowConnectModal(false)}
+                className="absolute right-4 top-4 text-gray-400 hover:text-white transition-colors"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+              
+              <h2 className="text-xl font-bold mb-6">Configurer la connexion</h2>
+              <form onSubmit={handleCustomConnection}>
+                <div className="mb-6">
+                  <label htmlFor="wsUrl" className="block text-sm font-medium text-gray-400 mb-2">
+                    URL du serveur WebSocket
+                  </label>
+                  <input
+                    id="wsUrl"
+                    type="text"
+                    value={customWsUrl}
+                    onChange={(e) => setCustomWsUrl(e.target.value)}
+                    placeholder="ws://adresse-ip:3001"
+                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-white"
+                  />
+                  <p className="mt-2 text-xs text-gray-500">
+                    Format: ws://192.168.1.xxx:3001
+                  </p>
+                </div>
+                <div className="flex gap-3">
+                  <button
+                    type="submit"
+                    className="flex-1 bg-blue-500 hover:bg-blue-600 text-white font-medium rounded-lg px-4 py-2 transition-colors"
+                  >
+                    Connecter
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowConnectModal(false)}
+                    className="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-medium rounded-lg px-4 py-2 transition-colors"
+                  >
+                    Annuler
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* Confirmation Modal */}
+        {confirmAction && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+            <div className="bg-gray-800 rounded-xl w-full max-w-md p-6 border border-gray-700">
+              <h2 className="text-xl font-bold mb-4 text-red-400">Confirmation</h2>
+              <p className="mb-6">
+                {confirmAction === 'reboot' 
+                  ? 'Voulez-vous vraiment redémarrer le Raspberry Pi?' 
+                  : 'Voulez-vous vraiment éteindre le Raspberry Pi?'}
+              </p>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => {
+                    sendCommand({ type: confirmAction });
+                    setConfirmAction(null);
+                  }}
+                  className="flex-1 bg-red-500 hover:bg-red-600 text-white font-medium rounded-lg px-4 py-2 transition-colors"
+                >
+                  Confirmer
+                </button>
+                <button
+                  onClick={() => setConfirmAction(null)}
+                  className="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-medium rounded-lg px-4 py-2 transition-colors"
+                >
+                  Annuler
+                </button>
               </div>
             </div>
           </div>

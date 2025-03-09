@@ -15,20 +15,29 @@ const useWebSocket = () => {
     const [statusMessage, setStatusMessage] = useState('');
     const reconnectTimeoutRef = useRef(null);
 
-    const connect = useCallback(() => {
+    const connect = useCallback((customUrl = null) => {
         try {
-            // Get WebSocket URL from environment or fallback to auto-detection
+            // Get WebSocket URL from custom input, environment, or fallback to auto-detection
             let wsUrl;
-            if (process.env.NEXT_PUBLIC_WS_URL) {
+            if (customUrl) {
+                wsUrl = customUrl;
+            } else if (process.env.NEXT_PUBLIC_WS_URL) {
                 wsUrl = process.env.NEXT_PUBLIC_WS_URL;
+            } else if (localStorage.getItem('noobots_ws_url')) {
+                wsUrl = localStorage.getItem('noobots_ws_url');
             } else {
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 const host = window.location.hostname;
                 wsUrl = `${protocol}//${host}:3001`;
             }
 
+            // Save URL to localStorage for future use
+            if (customUrl) {
+                localStorage.setItem('noobots_ws_url', customUrl);
+            }
+
             // Add connection debug info to UI
-            setStatusMessage(`Attempting to connect to: ${wsUrl}`);
+            setStatusMessage(`Connexion à: ${wsUrl}`);
 
             const ws = new WebSocket(wsUrl);
 
@@ -50,6 +59,12 @@ const useWebSocket = () => {
                             break;
                         case 'status':
                             setStatusMessage(data.message);
+                            break;
+                        case 'cameraStatus':
+                            // Forward camera status messages to registered handlers
+                            if (window.cameraMessageHandlers) {
+                                window.cameraMessageHandlers.forEach(handler => handler(data));
+                            }
                             break;
                         default:
                             console.log('Received message:', data);
@@ -111,7 +126,11 @@ const useWebSocket = () => {
         isConnected,
         systemStats,
         statusMessage,
-        sendCommand
+        sendCommand,
+        connect,
+        wsUrl: localStorage.getItem('noobots_ws_url') || 
+               process.env.NEXT_PUBLIC_WS_URL || 
+               `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}://${window.location.hostname}:3001`
     };
 };
 
