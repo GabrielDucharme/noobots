@@ -6,14 +6,24 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
     const [isCameraAvailable, setIsCameraAvailable] = useState(false);
     const [isCameraActive, setIsCameraActive] = useState(false);
     const [streamUrl, setStreamUrl] = useState('');
+    const [snapshotUrl, setSnapshotUrl] = useState('');
     const [isLoading, setIsLoading] = useState(true);
     const [refreshKey, setRefreshKey] = useState(Date.now());
+    const [useStreamingMode, setUseStreamingMode] = useState(true);
+    const [streamError, setStreamError] = useState(false);
+    const snapshotTimerRef = useRef(null);
     const videoRef = useRef(null);
     
     // Function to force refresh the camera stream
     const refreshStream = () => {
         console.log('Manually refreshing camera stream');
+        setStreamError(false);
         setRefreshKey(Date.now());
+        
+        // Toggle between streaming and snapshot modes
+        if (streamError) {
+            setUseStreamingMode(!useStreamingMode);
+        }
     };
 
     useEffect(() => {
@@ -21,10 +31,11 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
             // Ask for camera status
             sendCommand({ type: 'getCameraStatus' });
             
-            // Determine server host for camera stream URL
+            // Determine server host for camera URLs
             if (serverHost) {
                 // Extract host and protocol from WebSocket URL
                 let host = serverHost;
+                let baseUrl;
                 
                 // Handle ngrok URLs properly
                 if (host.includes('ngrok')) {
@@ -35,7 +46,7 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                         host = host.replace('wss://', 'https://');
                     }
                     // Use the same ngrok domain but different endpoint
-                    setStreamUrl(`${host}/camera/stream`);
+                    baseUrl = host;
                 } else {
                     // Normal handling for direct connections
                     if (host.startsWith('ws://')) {
@@ -46,16 +57,26 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                     
                     // Remove any path and just keep the host:port
                     const urlParts = host.split('/');
-                    const baseUrl = urlParts[0];
-                    
-                    setStreamUrl(`${baseUrl}/camera/stream`);
+                    baseUrl = urlParts[0];
                 }
                 
-                console.log('Camera stream URL set to:', streamUrl);
+                setStreamUrl(`${baseUrl}/camera/stream`);
+                setSnapshotUrl(`${baseUrl}/camera/snapshot`);
+                
+                console.log('Camera URLs set:', {
+                    stream: `${baseUrl}/camera/stream`,
+                    snapshot: `${baseUrl}/camera/snapshot`
+                });
             }
         } else {
             setIsCameraAvailable(false);
             setIsCameraActive(false);
+            
+            // Clear snapshot timer when disconnected
+            if (snapshotTimerRef.current) {
+                clearInterval(snapshotTimerRef.current);
+                snapshotTimerRef.current = null;
+            }
         }
     }, [isConnected, serverHost, sendCommand]);
 
@@ -67,20 +88,25 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
             setIsCameraActive(message.active);
             setIsLoading(false);
             
-            // Reload stream URL when camera becomes active
-            if (message.active && serverHost) {
-                const host = serverHost.startsWith('ws://') 
-                    ? serverHost.replace('ws://', 'http://') 
-                    : serverHost.replace('wss://', 'https://');
+            // Setup snapshot timer or clear it based on camera status
+            if (message.active) {
+                // Force refresh the stream URLs with a cache-busting parameter
+                setRefreshKey(Date.now());
+                setStreamError(false);
                 
-                if (host.includes('ngrok')) {
-                    setStreamUrl(`${host}/camera/stream?t=${Date.now()}`);
-                } else {
-                    const baseUrl = host.split('/')[0];
-                    setStreamUrl(`${baseUrl}/camera/stream?t=${Date.now()}`);
+                // Set up snapshot timer for fallback mode
+                if (!useStreamingMode && !snapshotTimerRef.current) {
+                    snapshotTimerRef.current = setInterval(() => {
+                        // Force a new snapshot by updating the timestamp
+                        setRefreshKey(Date.now());
+                    }, 2000); // Update every 2 seconds
                 }
-                
-                console.log('Stream URL updated:', streamUrl);
+            } else {
+                // Clear snapshot timer when camera is inactive
+                if (snapshotTimerRef.current) {
+                    clearInterval(snapshotTimerRef.current);
+                    snapshotTimerRef.current = null;
+                }
             }
         }
     };
@@ -96,14 +122,49 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
             }
             
             return () => {
+                // Clean up message handlers
                 if (window.cameraMessageHandlers) {
                     window.cameraMessageHandlers = window.cameraMessageHandlers.filter(
                         handler => handler !== handleCameraMessage
                     );
                 }
+                
+                // Clean up snapshot timer
+                if (snapshotTimerRef.current) {
+                    clearInterval(snapshotTimerRef.current);
+                    snapshotTimerRef.current = null;
+                }
             };
         }
     }, []);
+    
+    // Effect to manage snapshot timer when streaming mode changes
+    useEffect(() => {
+        if (isCameraActive) {
+            if (!useStreamingMode) {
+                // Start the snapshot timer when in snapshot mode
+                if (!snapshotTimerRef.current) {
+                    snapshotTimerRef.current = setInterval(() => {
+                        setRefreshKey(Date.now());
+                    }, 2000);
+                }
+            } else {
+                // Clear the timer when in streaming mode
+                if (snapshotTimerRef.current) {
+                    clearInterval(snapshotTimerRef.current);
+                    snapshotTimerRef.current = null;
+                }
+            }
+        }
+        
+        // Clean up on unmount
+        return () => {
+            if (snapshotTimerRef.current) {
+                clearInterval(snapshotTimerRef.current);
+                snapshotTimerRef.current = null;
+            }
+        };
+    }, [useStreamingMode, isCameraActive]);
 
     const toggleCamera = () => {
         if (isCameraActive) {
@@ -143,21 +204,66 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                     <div className="bg-gray-900 rounded-lg overflow-hidden mb-4 relative" style={{ minHeight: '240px' }}>
                         {isCameraActive ? (
                             <>
-                                <img 
-                                    key={`camera-stream-${refreshKey}`} // Force re-render with changing key
-                                    src={`${streamUrl}?t=${refreshKey}`} // Add timestamp to prevent caching
-                                    className="w-full h-auto" 
-                                    alt="Camera stream"
-                                    onError={(e) => {
-                                        console.error('Failed to load camera stream:', e);
-                                        // Try to reload the image after a short delay
-                                        setTimeout(() => {
-                                            e.target.src = `${streamUrl}?t=${Date.now()}`;
-                                        }, 1000);
-                                    }}
-                                />
-                                <div className="absolute bottom-2 right-2 bg-black bg-opacity-50 px-2 py-1 rounded text-xs text-white">
-                                    Tip: If stream is not visible, try refreshing
+                                {useStreamingMode ? (
+                                    // Stream mode - continuous video
+                                    <img 
+                                        key={`camera-stream-${refreshKey}`} // Force re-render with changing key
+                                        src={`${streamUrl}?t=${refreshKey}`} // Add timestamp to prevent caching
+                                        className="w-full h-auto" 
+                                        alt="Camera stream"
+                                        onError={(e) => {
+                                            console.error('Failed to load camera stream:', e);
+                                            setStreamError(true);
+                                            // Automatically switch to snapshot mode after stream error
+                                            setUseStreamingMode(false);
+                                            
+                                            // Start snapshot timer if not already running
+                                            if (!snapshotTimerRef.current) {
+                                                snapshotTimerRef.current = setInterval(() => {
+                                                    setRefreshKey(Date.now());
+                                                }, 2000);
+                                            }
+                                        }}
+                                    />
+                                ) : (
+                                    // Snapshot mode - individual frames
+                                    <img 
+                                        key={`camera-snapshot-${refreshKey}`}
+                                        src={`${snapshotUrl}?t=${refreshKey}`}
+                                        className="w-full h-auto"
+                                        alt="Camera snapshot"
+                                        onError={(e) => {
+                                            console.error('Failed to load camera snapshot:', e);
+                                            // Try again with the next timer cycle
+                                        }}
+                                    />
+                                )}
+                                
+                                <div className="absolute bottom-2 right-2 bg-black bg-opacity-70 px-2 py-1 rounded text-xs text-white">
+                                    {useStreamingMode ? 'Mode: Stream' : 'Mode: Snapshots'} | 
+                                    <button 
+                                        onClick={() => {
+                                            setUseStreamingMode(!useStreamingMode);
+                                            setRefreshKey(Date.now());
+                                            
+                                            // Manage snapshot timer based on mode
+                                            if (useStreamingMode) {
+                                                if (!snapshotTimerRef.current) {
+                                                    snapshotTimerRef.current = setInterval(() => {
+                                                        setRefreshKey(Date.now());
+                                                    }, 2000);
+                                                }
+                                            } else {
+                                                if (snapshotTimerRef.current) {
+                                                    clearInterval(snapshotTimerRef.current);
+                                                    snapshotTimerRef.current = null;
+                                                }
+                                            }
+                                        }}
+                                        className="ml-2 underline"
+                                    >
+                                        Changer
+                                    </button>
                                 </div>
                             </>
                         ) : (

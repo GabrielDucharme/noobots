@@ -217,14 +217,89 @@ let isRaspberryPi = false;
 // Check if running on Raspberry Pi
 function checkIsRaspberryPi() {
     try {
-        return fs.existsSync('/usr/bin/raspistill') || 
-               fs.existsSync('/usr/bin/libcamera-still') || 
-               (process.platform === 'linux' && fs.readFileSync('/proc/cpuinfo', 'utf8').includes('Raspberry Pi'));
+        const hasRaspistill = fs.existsSync('/usr/bin/raspistill');
+        const hasLibcameraStill = fs.existsSync('/usr/bin/libcamera-still');
+        const hasVideoDevice = fs.existsSync('/dev/video0');
+        const isLinux = process.platform === 'linux';
+        
+        let isPiFromCpuInfo = false;
+        if (isLinux) {
+            try {
+                const cpuInfo = fs.readFileSync('/proc/cpuinfo', 'utf8');
+                isPiFromCpuInfo = cpuInfo.includes('Raspberry Pi');
+            } catch (e) {
+                // Ignore error reading cpuinfo
+            }
+        }
+        
+        const result = hasRaspistill || hasLibcameraStill || (isLinux && (hasVideoDevice || isPiFromCpuInfo));
+        console.log('Checking if Raspberry Pi:', { 
+            result, 
+            hasRaspistill, 
+            hasLibcameraStill, 
+            hasVideoDevice,
+            isPiFromCpuInfo
+        });
+        
+        return result;
     } catch (error) {
         console.log('Not running on Raspberry Pi:', error.message);
         return false;
     }
 }
+
+// Add a still image endpoint as fallback
+app.get('/camera/snapshot', (req, res) => {
+    isRaspberryPi = checkIsRaspberryPi();
+    
+    if (!isRaspberryPi) {
+        return res.status(404).send('Camera functionality only available on Raspberry Pi');
+    }
+    
+    // Determine which camera command to use
+    const useLibcamera = fs.existsSync('/usr/bin/libcamera-still');
+    let cmd, args;
+    
+    if (useLibcamera) {
+        cmd = 'libcamera-still';
+        args = ['-n', '-t', '100', '-o', '-', '--width', '640', '--height', '480'];
+    } else {
+        cmd = 'raspistill';
+        args = ['-n', '-t', '100', '-o', '-', '-w', '640', '-h', '480'];
+    }
+    
+    // Take a picture
+    const stillProcess = spawn(cmd, args);
+    let imageData = Buffer.alloc(0);
+    
+    stillProcess.stdout.on('data', (data) => {
+        imageData = Buffer.concat([imageData, data]);
+    });
+    
+    stillProcess.on('error', (err) => {
+        console.error('Error taking snapshot:', err);
+        res.status(500).send('Error capturing image');
+    });
+    
+    stillProcess.on('close', (code) => {
+        if (code !== 0) {
+            console.error(`Snapshot process exited with code ${code}`);
+            return res.status(500).send('Error capturing image');
+        }
+        
+        if (imageData.length > 0) {
+            res.writeHead(200, {
+                'Content-Type': 'image/jpeg',
+                'Content-Length': imageData.length,
+                'Cache-Control': 'no-cache',
+                'Access-Control-Allow-Origin': '*'
+            });
+            res.end(imageData);
+        } else {
+            res.status(500).send('No image data received from camera');
+        }
+    });
+});
 
 // Initialize camera status
 let isCameraActive = false;
@@ -264,13 +339,10 @@ app.get('/camera/stream', (req, res) => {
     // Set appropriate headers for MJPEG stream
     res.writeHead(200, {
         'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Expires': '0',
+        'Cache-Control': 'no-cache',
         'Connection': 'close',
         'Pragma': 'no-cache',
-        'Access-Control-Allow-Origin': '*', // Allow cross-origin requests for ngrok
-        'Access-Control-Allow-Methods': 'GET',
-        'Access-Control-Allow-Headers': 'Content-Type'
+        'Access-Control-Allow-Origin': '*'
     });
     
     // Start the camera if not already running
@@ -278,48 +350,12 @@ app.get('/camera/stream', (req, res) => {
         startCamera();
     }
     
-    // For some systems that don't support direct streaming via MJPEG,
-    // we'll use a fallback method to capture frames regularly
-    if (!cameraProcess || !cameraProcess.stdout) {
-        // Use child_process to take snapshots every few milliseconds
-        const captureFrame = () => {
-            const cmd = fs.existsSync('/usr/bin/libcamera-still') ? 'libcamera-still' : 'raspistill';
-            const frameProcess = spawn(cmd, [
-                '-n',               // No preview
-                '-t', '10',         // Minimal delay (ms)
-                '-o', '-',          // Output to stdout
-                '-w', '640',        // Width
-                '-h', '480',        // Height
-                '-q', '75'          // Quality (JPEG)
-            ]);
-            
-            let imageData = Buffer.alloc(0);
-            
-            frameProcess.stdout.on('data', (data) => {
-                imageData = Buffer.concat([imageData, data]);
-            });
-            
-            frameProcess.on('close', () => {
-                if (imageData.length > 0) {
-                    try {
-                        res.write('--frame\r\n');
-                        res.write('Content-Type: image/jpeg\r\n');
-                        res.write('Content-Length: ' + imageData.length + '\r\n\r\n');
-                        res.write(imageData);
-                        res.write('\r\n');
-                        
-                        setTimeout(captureFrame, 200); // Capture at ~5fps
-                    } catch (e) {
-                        console.error('Error writing frame to stream:', e);
-                    }
-                }
-            });
-        };
-        
-        captureFrame();
-    } else {
-        // Use the standard streaming method if available
+    if (cameraProcess && cameraProcess.stdout) {
+        console.log('Piping camera output to response');
         cameraProcess.stdout.pipe(res);
+    } else {
+        console.error('Camera process not available');
+        return res.status(500).send('Camera process not available');
     }
     
     // Handle connection close
@@ -334,33 +370,40 @@ function startCamera() {
     try {
         console.log('Starting camera stream...');
         
-        // Use libcamera (newer Raspberry Pi OS) or fallback to raspivid
-        const useLibcamera = fs.existsSync('/usr/bin/libcamera-vid');
+        // Detect available camera tools
+        const hasLibcamera = fs.existsSync('/usr/bin/libcamera-vid');
+        const hasRaspivid = fs.existsSync('/usr/bin/raspivid');
         
-        if (useLibcamera) {
-            // Enhanced command for libcamera-vid with better V2 camera compatibility
+        console.log('Camera tools available:', {
+            libcamera: hasLibcamera,
+            raspivid: hasRaspivid
+        });
+        
+        if (hasLibcamera) {
+            // Simplified libcamera command
             cameraProcess = spawn('libcamera-vid', [
-                '-t', '0',          // No timeout
-                '--width', '640',   // Width
-                '--height', '480',  // Height
-                '--framerate', '24', // FPS
-                '--codec', 'mjpeg', // Use MJPEG codec for better browser compatibility
-                '--camera', '0',    // Use the first camera
-                '--nopreview',      // Don't show preview window
-                '-o', '-'           // Output to stdout
+                '-t', '0',         // No timeout
+                '--width', '640',  // Width
+                '--height', '480', // Height
+                '-o', '-'          // Output to stdout
+            ]);
+        } else if (hasRaspivid) {
+            // Simplified raspivid command
+            cameraProcess = spawn('raspivid', [
+                '-t', '0',         // No timeout
+                '-w', '640',       // Width
+                '-h', '480',       // Height
+                '-o', '-'          // Output to stdout
             ]);
         } else {
-            // Enhanced command for raspivid
-            cameraProcess = spawn('raspivid', [
-                '-t', '0',          // No timeout
-                '-w', '640',        // Width
-                '-h', '480',        // Height
-                '-fps', '24',       // FPS
-                '-o', '-',          // Output to stdout
-                '-pf', 'MJPEG',     // Use MJPEG format
-                '-n'                // No preview window
-            ]);
+            console.error('No camera tools found. Cannot start camera.');
+            return;
         }
+        
+        // Log any stderr output from the camera process
+        cameraProcess.stderr.on('data', (data) => {
+            console.error('Camera process error:', data.toString());
+        });
         
         // Broadcast to all connected clients that camera is now active
         wss.clients.forEach(client => {
