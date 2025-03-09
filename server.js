@@ -6,14 +6,205 @@ const { spawn } = require('child_process');
 const si = require('systeminformation');
 const fs = require('fs');
 const path = require('path');
+const util = require('util');
 
 // Create Express app
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Enhanced logging system
+const LOG_LEVELS = {
+    DEBUG: 0,
+    INFO: 1,
+    WARN: 2,
+    ERROR: 3,
+    CRITICAL: 4
+};
+
+const LOG_COLORS = {
+    DEBUG: '\x1b[36m', // Cyan
+    INFO: '\x1b[32m',  // Green
+    WARN: '\x1b[33m',  // Yellow
+    ERROR: '\x1b[31m', // Red
+    CRITICAL: '\x1b[35m', // Magenta
+    RESET: '\x1b[0m'   // Reset
+};
+
+// In-memory log storage with max 1000 entries
+const logHistory = [];
+const MAX_LOG_HISTORY = 1000;
+let currentLogLevel = LOG_LEVELS.INFO; // Default log level
+
+// Custom logger function
+function customLog(level, message, data = null) {
+    // Only log if the level is >= current log level
+    if (LOG_LEVELS[level] < currentLogLevel) {
+        return;
+    }
+
+    const timestamp = new Date().toISOString();
+    const logEntry = {
+        timestamp,
+        level,
+        message,
+        data: data ? util.inspect(data, { depth: 3, colors: false }) : null
+    };
+    
+    // Add to history, maintaining max size
+    logHistory.push(logEntry);
+    if (logHistory.length > MAX_LOG_HISTORY) {
+        logHistory.shift();
+    }
+    
+    // Log to console with colors
+    const color = LOG_COLORS[level] || LOG_COLORS.RESET;
+    console.log(`${color}[${timestamp}] [${level}] ${message}${data ? ': ' + util.inspect(data, { depth: 3, colors: true }) : ''}${LOG_COLORS.RESET}`);
+    
+    // Broadcast log to all connected clients
+    if (wss && wss.clients) {
+        wss.clients.forEach(client => {
+            if (client.readyState === 1) { // WebSocket.OPEN = 1
+                try {
+                    client.send(JSON.stringify({
+                        type: 'log',
+                        entry: logEntry
+                    }));
+                } catch (err) {
+                    console.error('Error sending log to client:', err);
+                }
+            }
+        });
+    }
+    
+    return logEntry;
+}
+
+// Create logger methods for each level
+const logger = {
+    debug: (message, data) => customLog('DEBUG', message, data),
+    info: (message, data) => customLog('INFO', message, data),
+    warn: (message, data) => customLog('WARN', message, data),
+    error: (message, data) => customLog('ERROR', message, data),
+    critical: (message, data) => customLog('CRITICAL', message, data),
+    setLevel: (level) => {
+        if (LOG_LEVELS[level] !== undefined) {
+            currentLogLevel = LOG_LEVELS[level];
+            logger.info(`Log level set to ${level}`);
+            return true;
+        }
+        return false;
+    },
+    getHistory: (filter = {}) => {
+        let filtered = [...logHistory];
+        
+        // Apply level filter
+        if (filter.level) {
+            filtered = filtered.filter(entry => 
+                filter.level === entry.level || 
+                (Array.isArray(filter.level) && filter.level.includes(entry.level))
+            );
+        }
+        
+        // Apply search filter
+        if (filter.search) {
+            const searchLower = filter.search.toLowerCase();
+            filtered = filtered.filter(entry => 
+                entry.message.toLowerCase().includes(searchLower) || 
+                (entry.data && entry.data.toLowerCase().includes(searchLower))
+            );
+        }
+        
+        // Apply date range filter
+        if (filter.startDate) {
+            filtered = filtered.filter(entry => new Date(entry.timestamp) >= new Date(filter.startDate));
+        }
+        
+        if (filter.endDate) {
+            filtered = filtered.filter(entry => new Date(entry.timestamp) <= new Date(filter.endDate));
+        }
+        
+        // Apply limit
+        if (filter.limit && filter.limit > 0) {
+            filtered = filtered.slice(-filter.limit);
+        }
+        
+        return filtered;
+    }
+};
+
 // Create HTTP server with Express
 const server = http.createServer(app);
+
+// Add routes for logs
+app.get('/api/logs', (req, res) => {
+    try {
+        const { level, search, startDate, endDate, limit } = req.query;
+        
+        const filter = {};
+        if (level) filter.level = level;
+        if (search) filter.search = search;
+        if (startDate) filter.startDate = startDate;
+        if (endDate) filter.endDate = endDate;
+        if (limit) filter.limit = parseInt(limit, 10);
+        
+        const logs = logger.getHistory(filter);
+        res.json({ logs });
+    } catch (error) {
+        logger.error('Error fetching logs', error);
+        res.status(500).json({ error: 'Failed to fetch logs' });
+    }
+});
+
+app.post('/api/logs/level', (req, res) => {
+    try {
+        const { level } = req.body;
+        if (!level || !LOG_LEVELS.hasOwnProperty(level)) {
+            return res.status(400).json({ error: 'Invalid log level' });
+        }
+        
+        const success = logger.setLevel(level);
+        if (success) {
+            res.json({ message: `Log level set to ${level}` });
+        } else {
+            res.status(400).json({ error: 'Failed to set log level' });
+        }
+    } catch (error) {
+        logger.error('Error setting log level', error);
+        res.status(500).json({ error: 'Failed to set log level' });
+    }
+});
+
+app.get('/api/logs/export', (req, res) => {
+    try {
+        const { format = 'json' } = req.query;
+        const logs = logger.getHistory(req.query);
+        
+        if (format === 'csv') {
+            res.setHeader('Content-Type', 'text/csv');
+            res.setHeader('Content-Disposition', 'attachment; filename=logs.csv');
+            
+            // CSV header
+            let csv = 'Timestamp,Level,Message,Data\n';
+            
+            // Add rows
+            logs.forEach(log => {
+                const message = log.message.replace(/"/g, '""');
+                const data = log.data ? log.data.replace(/"/g, '""') : '';
+                csv += `"${log.timestamp}","${log.level}","${message}","${data}"\n`;
+            });
+            
+            res.send(csv);
+        } else {
+            res.setHeader('Content-Type', 'application/json');
+            res.setHeader('Content-Disposition', 'attachment; filename=logs.json');
+            res.json(logs);
+        }
+    } catch (error) {
+        logger.error('Error exporting logs', error);
+        res.status(500).json({ error: 'Failed to export logs' });
+    }
+});
 
 // Set up camera stream endpoint
 let cameraProcess = null;
@@ -155,13 +346,16 @@ function stopCamera() {
     }
 }
 
-// Create WebSocket server attached to HTTP server
-const wss = new WebSocketServer({ server });
+// Define PORT before WebSocket server
+const PORT = 3001;
 
 // Start server
-const PORT = 3001;
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server is running on port ${PORT} and accepting external connections`);
+    if (logger) {
+        logger.info(`Server is running on port ${PORT} and accepting external connections`);
+    } else {
+        console.log(`Server is running on port ${PORT} and accepting external connections`);
+    }
 });
 
 // Track system stats interval
@@ -223,7 +417,7 @@ async function getSystemStats() {
 }
 
 async function handleCommand(ws, command) {
-    console.log('Command type:', command.type, 'Type of:', typeof command.type);
+    logger.debug('Received command', command);
 
     switch (command.type) {
         case 'startStatsMonitoring':
@@ -306,7 +500,7 @@ async function handleCommand(ws, command) {
             break;
 
         case 'partyMode':
-            console.log('Entering party mode case');  // Debug log
+            logger.info('Party mode activated!');
             const partyArt = `
          ______________
        /              \\
@@ -317,25 +511,56 @@ async function handleCommand(ws, command) {
    PARTY MODE ACTIVATED!
    UN GROS BAR MIX !
             `;
-            console.log(partyArt);
+            logger.debug('Party ASCII art', partyArt);
             ws.send(JSON.stringify({
                 type: 'status',
                 message: 'Party mode activé! MANGE UN ROTEUX OU DEUX 🌭🎉'
             }));
             break;
+            
+        case 'getLogs':
+            const { filter = {} } = command;
+            const logs = logger.getHistory(filter);
+            ws.send(JSON.stringify({
+                type: 'logHistory',
+                logs
+            }));
+            break;
+            
+        case 'setLogLevel':
+            const { level } = command;
+            if (level && LOG_LEVELS.hasOwnProperty(level)) {
+                logger.setLevel(level);
+                ws.send(JSON.stringify({
+                    type: 'status',
+                    message: `Niveau de journalisation défini sur ${level}`
+                }));
+            } else {
+                ws.send(JSON.stringify({
+                    type: 'status',
+                    message: `Niveau de journalisation invalide: ${level}`
+                }));
+            }
+            break;
 
         default:
-            console.log('Unknown command:', command);
+            logger.warn('Unknown command received', command);
     }
 }
 
 // Track connected clients
 let connectedClients = 0;
 
+// Create WebSocket server
+const wss = new WebSocketServer({ server });
+
+// Initialize logging after WebSocket server is created
+logger.info('Server starting', { port: PORT });
+
 wss.on('connection', (ws, req) => {
     connectedClients++;
     const clientIp = req.socket.remoteAddress;
-    console.log(`New client connected from ${clientIp}. Total clients: ${connectedClients}`);
+    logger.info('Client connected', { ip: clientIp, totalClients: connectedClients });
 
     // Send initial connection message with client count
     ws.send(JSON.stringify({
@@ -346,25 +571,25 @@ wss.on('connection', (ws, req) => {
     ws.on('message', async (data) => {
         try {
             const message = JSON.parse(data);
-            console.log('Received:', message);
             await handleCommand(ws, message);
         } catch (error) {
-            console.error('Error processing message:', error);
+            logger.error('Error processing WebSocket message', error);
         }
     });
 
     ws.on('close', () => {
         connectedClients--;
-        console.log(`Client disconnected. Total clients: ${connectedClients}`);
+        logger.info('Client disconnected', { totalClients: connectedClients });
         
         // Only clear interval if no clients are connected
         if (connectedClients === 0 && statsInterval) {
             clearInterval(statsInterval);
             statsInterval = null;
+            logger.debug('Stopped stats monitoring - no clients connected');
         }
     });
 
     ws.on('error', (error) => {
-        console.error('WebSocket error:', error);
+        logger.error('WebSocket connection error', error);
     });
 });

@@ -66,6 +66,13 @@ const useWebSocket = () => {
                                 window.cameraMessageHandlers.forEach(handler => handler(data));
                             }
                             break;
+                        case 'log':
+                        case 'logHistory':
+                            // Forward log messages to registered handlers
+                            if (window.logMessageHandlers) {
+                                window.logMessageHandlers.forEach(handler => handler(data));
+                            }
+                            break;
                         default:
                             console.log('Received message:', data);
                     }

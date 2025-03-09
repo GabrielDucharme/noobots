@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import useWebSocket from './hooks/useWebSocket';
 import DebugPanel from './components/DebugPanel';
 import CameraPanel from './components/CameraPanel';
+import LogConsole from './components/LogConsole';
 
 export default function Home() {
   const { isConnected, systemStats, statusMessage, sendCommand, wsUrl, connect } = useWebSocket();
@@ -235,6 +236,14 @@ export default function Home() {
           />
         </div>
 
+        {/* Log Console */}
+        <div className="mt-6">
+          <LogConsole
+            isConnected={isConnected}
+            sendCommand={sendCommand}
+          />
+        </div>
+        
         {/* Status Log */}
         <div className="mt-6 bg-gray-800 rounded-xl shadow-lg p-6 border border-gray-700">
           <div className="flex items-center gap-3 mb-4">
