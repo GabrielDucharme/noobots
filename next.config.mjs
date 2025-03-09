@@ -10,6 +10,10 @@ const nextConfig = {
     experimental: {
         serverActions: true,
     },
+    // Enable static exports for deployment platforms that need it
+    output: 'export',
+    // Disable server-side image optimization since we're using static export
+    images: { unoptimized: true },
 };
 
 export default nextConfig;

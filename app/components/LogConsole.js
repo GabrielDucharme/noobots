@@ -51,19 +51,22 @@ export default function LogConsole({ isConnected, sendCommand }) {
     
     // Register message handler
     useEffect(() => {
-        if (window.logMessageHandlers) {
-            window.logMessageHandlers.push(handleLogMessage);
-        } else {
-            window.logMessageHandlers = [handleLogMessage];
-        }
-        
-        return () => {
+        // Only run on client side
+        if (typeof window !== 'undefined') {
             if (window.logMessageHandlers) {
-                window.logMessageHandlers = window.logMessageHandlers.filter(
-                    handler => handler !== handleLogMessage
-                );
+                window.logMessageHandlers.push(handleLogMessage);
+            } else {
+                window.logMessageHandlers = [handleLogMessage];
             }
-        };
+            
+            return () => {
+                if (window.logMessageHandlers) {
+                    window.logMessageHandlers = window.logMessageHandlers.filter(
+                        handler => handler !== handleLogMessage
+                    );
+                }
+            };
+        }
     }, []);
     
     // Auto-scroll to bottom when new logs arrive
@@ -121,6 +124,11 @@ export default function LogConsole({ isConnected, sendCommand }) {
     
     // Export logs
     const exportLogs = (format = 'json') => {
+        // Only run on client side
+        if (typeof window === 'undefined') {
+            return;
+        }
+        
         let url;
         if (window.location.protocol === 'https:') {
             url = `https://${window.location.hostname}:3001/api/logs/export?format=${format}`;

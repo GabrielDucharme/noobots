@@ -23,22 +23,31 @@ const useWebSocket = () => {
                 wsUrl = customUrl;
             } else if (process.env.NEXT_PUBLIC_WS_URL) {
                 wsUrl = process.env.NEXT_PUBLIC_WS_URL;
-            } else if (localStorage.getItem('noobots_ws_url')) {
+            } else if (typeof window !== 'undefined' && localStorage.getItem('noobots_ws_url')) {
                 wsUrl = localStorage.getItem('noobots_ws_url');
-            } else {
+            } else if (typeof window !== 'undefined') {
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 const host = window.location.hostname;
                 wsUrl = `${protocol}//${host}:3001`;
+            } else {
+                // Fallback for server-side rendering
+                wsUrl = 'ws://localhost:3001';
             }
 
             // Save URL to localStorage for future use
-            if (customUrl) {
+            if (customUrl && typeof window !== 'undefined') {
                 localStorage.setItem('noobots_ws_url', customUrl);
             }
 
             // Add connection debug info to UI
             setStatusMessage(`Connexion à: ${wsUrl}`);
 
+            // Ensure we're on the client side before creating WebSocket
+            if (typeof window === 'undefined') {
+                // Return early during server-side rendering
+                return null;
+            }
+            
             const ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
@@ -62,14 +71,14 @@ const useWebSocket = () => {
                             break;
                         case 'cameraStatus':
                             // Forward camera status messages to registered handlers
-                            if (window.cameraMessageHandlers) {
+                            if (typeof window !== 'undefined' && window.cameraMessageHandlers) {
                                 window.cameraMessageHandlers.forEach(handler => handler(data));
                             }
                             break;
                         case 'log':
                         case 'logHistory':
                             // Forward log messages to registered handlers
-                            if (window.logMessageHandlers) {
+                            if (typeof window !== 'undefined' && window.logMessageHandlers) {
                                 window.logMessageHandlers.forEach(handler => handler(data));
                             }
                             break;
@@ -107,17 +116,21 @@ const useWebSocket = () => {
     }, []);
 
     useEffect(() => {
-        const ws = connect();
+        // Only connect on the client side
+        if (typeof window !== 'undefined') {
+            const ws = connect();
 
-        return () => {
-            if (reconnectTimeoutRef.current) {
-                clearTimeout(reconnectTimeoutRef.current);
-            }
-            if (ws) {
-                ws.send(JSON.stringify({ type: 'stopStatsMonitoring' }));
-                ws.close();
-            }
-        };
+            return () => {
+                if (reconnectTimeoutRef.current) {
+                    clearTimeout(reconnectTimeoutRef.current);
+                }
+                if (ws) {
+                    ws.send(JSON.stringify({ type: 'stopStatsMonitoring' }));
+                    ws.close();
+                }
+            };
+        }
+        return () => {};
     }, [connect]);
 
     const sendCommand = useCallback((command) => {
@@ -129,15 +142,24 @@ const useWebSocket = () => {
         }
     }, [socket]);
 
+    // Generate the wsUrl safely for both client and server environments
+    const getWsUrl = () => {
+        if (typeof window === 'undefined') {
+            return process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001';
+        }
+        
+        return localStorage.getItem('noobots_ws_url') || 
+               process.env.NEXT_PUBLIC_WS_URL || 
+               `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}://${window.location.hostname}:3001`;
+    };
+
     return {
         isConnected,
         systemStats,
         statusMessage,
         sendCommand,
         connect,
-        wsUrl: localStorage.getItem('noobots_ws_url') || 
-               process.env.NEXT_PUBLIC_WS_URL || 
-               `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}://${window.location.hostname}:3001`
+        wsUrl: getWsUrl()
     };
 };
 

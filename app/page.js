@@ -16,13 +16,16 @@ export default function Home() {
 
   // Add debug toggle keyboard shortcut
   useEffect(() => {
-    const handleKeyPress = (e) => {
-      if (e.ctrlKey && e.key === 'd') {
-        setShowDebug(prev => !prev);
-      }
-    };
-    window.addEventListener('keydown', handleKeyPress);
-    return () => window.removeEventListener('keydown', handleKeyPress);
+    // Only add event listener on the client side
+    if (typeof window !== 'undefined') {
+      const handleKeyPress = (e) => {
+        if (e.ctrlKey && e.key === 'd') {
+          setShowDebug(prev => !prev);
+        }
+      };
+      window.addEventListener('keydown', handleKeyPress);
+      return () => window.removeEventListener('keydown', handleKeyPress);
+    }
   }, []);
 
   // Format uptime into human-readable format

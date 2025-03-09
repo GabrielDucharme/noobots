@@ -47,19 +47,22 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
 
     // Register this handler with the parent component
     useEffect(() => {
-        if (window.cameraMessageHandlers) {
-            window.cameraMessageHandlers.push(handleCameraMessage);
-        } else {
-            window.cameraMessageHandlers = [handleCameraMessage];
-        }
-        
-        return () => {
+        // Only run on client side
+        if (typeof window !== 'undefined') {
             if (window.cameraMessageHandlers) {
-                window.cameraMessageHandlers = window.cameraMessageHandlers.filter(
-                    handler => handler !== handleCameraMessage
-                );
+                window.cameraMessageHandlers.push(handleCameraMessage);
+            } else {
+                window.cameraMessageHandlers = [handleCameraMessage];
             }
-        };
+            
+            return () => {
+                if (window.cameraMessageHandlers) {
+                    window.cameraMessageHandlers = window.cameraMessageHandlers.filter(
+                        handler => handler !== handleCameraMessage
+                    );
+                }
+            };
+        }
     }, []);
 
     const toggleCamera = () => {
