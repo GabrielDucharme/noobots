@@ -149,7 +149,7 @@ export default function Home() {
                 </div>
                 <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
                   <div
-                    className="h-full bg-gradient-to-r from-yellow-500 to-red-400 transition-all duration-500"
+                    className="h-full bg-gradient-to-r from-yellow-500 to-red-500 transition-all duration-500"
                     style={{ width: `${Math.min((systemStats.temperature / 100) * 100, 100)}%` }}
                   />
                 </div>
