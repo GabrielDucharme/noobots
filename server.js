@@ -7,6 +7,7 @@ const si = require('systeminformation');
 const fs = require('fs');
 const path = require('path');
 const util = require('util');
+const os = require('os');
 
 // Create Express app
 const app = express();
@@ -248,7 +249,7 @@ function checkIsRaspberryPi() {
     }
 }
 
-// Add a simple single frame endpoint
+// Add a snapshot endpoint using rpicam-apps
 app.get('/camera/snapshot', (req, res) => {
     isRaspberryPi = checkIsRaspberryPi();
     
@@ -261,46 +262,91 @@ app.get('/camera/snapshot', (req, res) => {
     res.header('Access-Control-Allow-Methods', 'GET');
     res.header('Access-Control-Allow-Headers', 'Content-Type');
     
-    console.log('Taking simple camera snapshot...');
+    logger.info('Taking camera snapshot using rpicam-apps...');
     
-    // Determine which camera command to use - prioritize raspistill for guaranteed JPEG output
-    const useRaspistill = fs.existsSync('/usr/bin/raspistill');
-    const useLibcamera = fs.existsSync('/usr/bin/libcamera-still');
+    // Check for available camera tools
+    const hasLibcameraStill = fs.existsSync('/usr/bin/libcamera-still');
+    const hasRaspistill = fs.existsSync('/usr/bin/raspistill');
     
     let cmd, args;
     
-    if (useRaspistill) {
-        console.log('Using raspistill for snapshot (guaranteed JPEG format)');
-        cmd = 'raspistill';
-        args = [
-            '-n',             // No preview
-            '-t', '200',      // Very quick warmup time - we want immediate feedback
-            '-o', '-',        // Output to stdout
-            '-w', '320',      // Smaller width for faster capture
-            '-h', '240',      // Smaller height for faster capture
-            '-e', 'jpg',      // Explicitly specify JPEG format
-            '-q', '80'        // Medium quality for speed
-        ];
-    } else if (useLibcamera) {
-        console.log('Using libcamera-still for snapshot');
+    // Set snapshot parameters
+    const width = 640;     // Better resolution than before
+    const height = 480;    // Better resolution than before
+    const quality = 85;    // Better quality
+    const timeout = 500;   // Allow more time for auto-exposure (was 200ms)
+    
+    if (hasLibcameraStill) {
+        logger.info('Using libcamera-still from rpicam-apps for snapshot');
         cmd = 'libcamera-still';
         args = [
-            '-n',              // No preview
-            '-t', '200',       // Quick warmup time in ms
-            '-o', '-',         // Output to stdout
-            '--width', '320',  // Smaller width
-            '--height', '240', // Smaller height
-            '--immediate'      // Don't wait for auto exposure
-            // Removed --encoding parameter to avoid timeout error
+            '-n',                    // No preview
+            '-t', timeout.toString(), // Warmup time in ms
+            '-o', '-',               // Output to stdout
+            '--width', width.toString(), 
+            '--height', height.toString(),
+            '--encoding', 'jpg',     // Explicitly request JPEG
+            '--quality', quality.toString(),
+            '--nopreview',           // No preview
+            '--immediate',           // Fast capture
+            '--autofocus-mode', 'auto', // Auto focus once
+            '--ev', '0',             // Default exposure compensation
+            '--awb', 'auto',         // Auto white balance
+            '--denoise', 'auto',     // Auto denoise for better image quality
+            '--hdr', 'off',          // HDR can slow down capture
+            '--tuning-file', '/usr/share/libcamera/tuning/imx219.json', // Sensor-specific tuning
+            '--metadata',            // Include image metadata if available
+            '--metadata-format', 'none', // Don't print metadata to stdout
+            '--flush',               // Flush buffers
+            '--shutter', '10000',    // Fixed shutter speed for consistency (10ms)
+            '--gain', '1.0',         // Starting gain value
+            '--brightness', '0.0',   // Default brightness
+            '--contrast', '1.0'      // Default contrast
+        ];
+    } else if (hasRaspistill) {
+        logger.info('Using raspistill for snapshot (legacy mode)');
+        cmd = 'raspistill';
+        args = [
+            '-n',                 // No preview
+            '-t', timeout.toString(), // Warmup time - we need a bit for exposure
+            '-o', '-',            // Output to stdout
+            '-w', width.toString(),
+            '-h', height.toString(),
+            '-e', 'jpg',          // Explicitly specify JPEG format
+            '-q', quality.toString(), // Quality
+            '-x', 'none',         // No EXIF metadata
+            '-ex', 'auto',        // Auto exposure
+            '-awb', 'auto',       // Auto white balance
+            '-mm', 'average',     // Metering mode
+            '-sh', '0',           // Default sharpness
+            '-co', '0',           // Default contrast
+            '-br', '50',          // Default brightness
+            '-sa', '0',           // Default saturation
+            '-drc', 'off',        // No DRC
+            '-st',                // Enable image statistics
+            '-ISO', '800'         // Default ISO
         ];
     } else {
-        console.error('No camera tools found for taking snapshots');
+        logger.error('No rpicam-apps tools found for taking snapshots');
         return res.status(500).send('No camera tools available');
     }
     
     // Take a picture
     try {
+        // Create temp dir for image if needed (helps with certain libcamera bugs)
+        const tempDir = path.join(os.tmpdir(), 'noobots-camera');
+        try {
+            if (!fs.existsSync(tempDir)) {
+                fs.mkdirSync(tempDir, { recursive: true });
+            }
+        } catch (dirErr) {
+            logger.warn('Could not create temp directory:', dirErr);
+            // Continue anyway
+        }
+        
+        logger.info(`Executing snapshot command: ${cmd} ${args.join(' ')}`);
         const stillProcess = spawn(cmd, args);
+        
         let imageData = Buffer.alloc(0);
         let stderrOutput = '';
         
@@ -309,33 +355,50 @@ app.get('/camera/snapshot', (req, res) => {
         });
         
         stillProcess.stderr.on('data', (data) => {
-            stderrOutput += data.toString();
+            const stderr = data.toString();
+            stderrOutput += stderr;
+            
+            // Only log if it's not a common warning
+            if (!stderr.includes('ALSA lib') && !stderr.includes('No protocol specified')) {
+                logger.warn('Snapshot stderr:', stderr);
+            }
         });
         
         stillProcess.on('error', (err) => {
-            console.error('Error taking snapshot:', err);
+            logger.error('Error spawning snapshot process:', err);
             return res.status(500).json({
-                error: 'Error capturing image', 
+                error: 'Error spawning camera process', 
                 details: err.message
             });
         });
         
         stillProcess.on('close', (code) => {
             if (code !== 0) {
-                console.error(`Snapshot process exited with code ${code}`, stderrOutput);
+                logger.error(`Snapshot process exited with code ${code}`, stderrOutput);
+                
+                // Try to create a helpful error message
+                let errorMessage = 'Unknown error capturing image';
+                if (stderrOutput.includes('Failed to enable camera')) {
+                    errorMessage = 'Failed to enable camera - is another process using it?';
+                } else if (stderrOutput.includes('Camera is not available')) {
+                    errorMessage = 'Camera hardware not available or not detected';
+                } else if (stderrOutput.includes('timeout')) {
+                    errorMessage = 'Camera operation timed out';
+                }
+                
                 return res.status(500).json({
-                    error: 'Error capturing image',
+                    error: errorMessage,
                     code: code,
                     stderr: stderrOutput
                 });
             }
             
             if (imageData.length > 0) {
-                console.log(`Snapshot captured successfully: ${imageData.length} bytes`);
+                logger.info(`Snapshot captured successfully: ${imageData.length} bytes`);
                 
                 // Check if it's a valid JPEG (starts with JPEG magic bytes FF D8)
                 if (imageData[0] === 0xFF && imageData[1] === 0xD8) {
-                    console.log('Valid JPEG format detected - first 20 bytes:', imageData.slice(0, 20).toString('hex'));
+                    logger.debug('Valid JPEG format detected');
                     
                     res.writeHead(200, {
                         'Content-Type': 'image/jpeg',
@@ -346,12 +409,20 @@ app.get('/camera/snapshot', (req, res) => {
                     });
                     res.end(imageData);
                     
-                    // Log timestamp to measure client-server time
-                    console.log('JPEG sent at:', new Date().toISOString());
+                    // Clean up any temp files
+                    try {
+                        const tempFiles = fs.readdirSync(tempDir);
+                        for (const file of tempFiles) {
+                            if (file.startsWith('libcamera') || file.startsWith('raspistill')) {
+                                fs.unlinkSync(path.join(tempDir, file));
+                            }
+                        }
+                    } catch (e) {
+                        // Ignore cleanup errors
+                    }
                 } else {
-                    // Not a JPEG - log what we actually got
-                    console.error('Invalid or non-JPEG data received');
-                    console.error('Data type check - first 32 bytes:', imageData.slice(0, 32).toString('hex'));
+                    // Not a JPEG - try to determine format
+                    logger.warn('Non-JPEG image data received');
                     
                     // Try to determine if it's another image format
                     let detectedFormat = 'unknown';
@@ -370,7 +441,7 @@ app.get('/camera/snapshot', (req, res) => {
                     }
                     
                     if (detectedFormat !== 'unknown') {
-                        console.log(`Detected format: ${detectedFormat}, sending as is`);
+                        logger.info(`Detected image format: ${detectedFormat}, sending as is`);
                         res.writeHead(200, {
                             'Content-Type': detectedFormat,
                             'Content-Length': imageData.length,
@@ -378,34 +449,54 @@ app.get('/camera/snapshot', (req, res) => {
                         });
                         res.end(imageData);
                     } else {
-                        // If unknown, return error info
-                        res.status(500).json({
-                            error: 'Invalid or unknown image format',
-                            dataStart: imageData.slice(0, 32).toString('hex'),
-                            dataLength: imageData.length
-                        });
+                        // If unknown, try to convert to text or return error
+                        const firstChars = imageData.toString('utf8', 0, Math.min(100, imageData.length));
+                        if (firstChars.trim().startsWith('{') || firstChars.trim().startsWith('[')) {
+                            // Probably JSON error output
+                            logger.error('Received JSON instead of image:', firstChars);
+                            return res.status(500).json({
+                                error: 'Camera returned JSON instead of image',
+                                details: firstChars
+                            });
+                        } else {
+                            // Unknown binary format
+                            return res.status(500).json({
+                                error: 'Invalid or unknown image format',
+                                dataStart: imageData.slice(0, 32).toString('hex'),
+                                dataLength: imageData.length
+                            });
+                        }
                     }
                 }
             } else {
-                console.error('No image data received from camera');
-                res.status(500).json({
+                logger.error('No image data received from camera');
+                return res.status(500).json({
                     error: 'No image data received from camera'
                 });
             }
         });
         
         // Set a timeout in case the process hangs
-        setTimeout(() => {
+        const timeoutHandler = setTimeout(() => {
             if (!res.headersSent) {
-                console.error('Snapshot timeout');
-                stillProcess.kill();
-                res.status(500).json({error: 'Snapshot timeout'});
+                logger.error('Snapshot process timed out');
+                try {
+                    stillProcess.kill('SIGKILL');
+                } catch (e) {
+                    // Ignore kill errors
+                }
+                return res.status(500).json({error: 'Snapshot process timed out'});
             }
-        }, 10000); // 10 second timeout
+        }, 8000); // 8 second timeout
+        
+        // Clear timeout when process ends
+        stillProcess.on('close', () => {
+            clearTimeout(timeoutHandler);
+        });
         
     } catch (err) {
-        console.error('Exception taking snapshot:', err);
-        res.status(500).json({
+        logger.error('Exception taking snapshot:', err);
+        return res.status(500).json({
             error: 'Exception capturing image', 
             details: err.message
         });
@@ -601,8 +692,87 @@ app.get('/camera/stream', (req, res) => {
     });
 });
 
+// Define a TCP server for camera streaming
+let tcpStreamServer = null;
+let tcpStreamConnections = [];
+const STREAM_TCP_PORT = 3002; // Dedicated port for camera TCP stream
+
+// Start TCP streaming server
+function startTcpStreamServer() {
+    if (tcpStreamServer) {
+        return; // Already running
+    }
+    
+    const net = require('net');
+    
+    logger.info(`Starting TCP camera stream server on port ${STREAM_TCP_PORT}...`);
+    
+    // Create TCP server for streaming
+    tcpStreamServer = net.createServer((socket) => {
+        const clientAddress = socket.remoteAddress;
+        logger.info(`New TCP camera stream connection from ${clientAddress}`);
+        
+        // Add connection to tracking array
+        tcpStreamConnections.push(socket);
+        
+        // Start camera if not already running
+        if (!isCameraActive) {
+            startCamera();
+        }
+        
+        // Handle client disconnection
+        socket.on('close', () => {
+            logger.info(`TCP camera stream connection closed from ${clientAddress}`);
+            
+            // Remove from connections array
+            const idx = tcpStreamConnections.indexOf(socket);
+            if (idx !== -1) {
+                tcpStreamConnections.splice(idx, 1);
+            }
+            
+            // Check if we should stop the camera if no clients
+            if (tcpStreamConnections.length === 0 && activeStreamConnections === 0) {
+                setTimeout(() => {
+                    if (tcpStreamConnections.length === 0 && activeStreamConnections === 0) {
+                        logger.info('No active stream connections for 30 seconds, stopping camera');
+                        stopCamera();
+                    }
+                }, 30000); // Wait 30 seconds before stopping
+            }
+        });
+        
+        socket.on('error', (err) => {
+            logger.error(`TCP camera stream socket error: ${err.message}`);
+        });
+    });
+    
+    // Handle server errors
+    tcpStreamServer.on('error', (err) => {
+        logger.error(`TCP camera stream server error: ${err.message}`);
+        // Try to restart server if port is in use - likely previous instance
+        if (err.code === 'EADDRINUSE') {
+            logger.warn(`TCP port ${STREAM_TCP_PORT} already in use, attempting to restart server`);
+            setTimeout(() => {
+                tcpStreamServer.close();
+                tcpStreamServer = null;
+                setTimeout(startTcpStreamServer, 1000);
+            }, 1000);
+        }
+    });
+    
+    // Start listening for connections
+    tcpStreamServer.listen(STREAM_TCP_PORT, '0.0.0.0', () => {
+        logger.info(`TCP camera stream server listening on port ${STREAM_TCP_PORT}`);
+    });
+}
+
 function startCamera() {
     if (isCameraActive || !isRaspberryPi) return;
+    
+    // Start TCP stream server if not started
+    if (!tcpStreamServer) {
+        startTcpStreamServer();
+    }
     
     // Kill any existing camera processes to free resources
     try {
@@ -611,76 +781,142 @@ function startCamera() {
             cameraProcess = null;
         }
     } catch (e) {
-        console.error('Error killing previous camera process:', e);
+        logger.error('Error killing previous camera process:', e);
     }
     
     try {
-        console.log('Starting camera stream with reduced settings for better stability...');
+        logger.info('Starting camera stream using rpicam-apps with TCP streaming...');
         
-        // Detect available camera tools
-        const hasLibcamera = fs.existsSync('/usr/bin/libcamera-vid');
+        // Detect available camera tools from rpicam-apps
+        const hasLibcameraVid = fs.existsSync('/usr/bin/libcamera-vid');
         const hasRaspivid = fs.existsSync('/usr/bin/raspivid');
         
-        console.log('Camera tools available:', {
-            libcamera: hasLibcamera,
+        logger.info('Camera tools available:', {
+            libcamera_vid: hasLibcameraVid,
             raspivid: hasRaspivid
         });
         
-        // Lower resolution and framerate to reduce resource usage
-        const width = 320;  // Lower resolution
-        const height = 240; // Lower resolution
-        const fps = 5;      // Lower framerate
+        // Set reasonable parameters for TCP streaming
+        const width = 640;            // Better resolution for clarity
+        const height = 480;           // Better resolution for clarity
+        const fps = 15;               // Smoother framerate
+        const bitrate = 1500000;      // 1.5Mbps for H264 streaming (better for TCP)
         
-        if (hasLibcamera) {
-            // Optimized libcamera command for resource efficiency
+        if (hasLibcameraVid) {
+            // Use rpicam-apps libcamera-vid for TCP streaming
+            logger.info('Using libcamera-vid from rpicam-apps for TCP streaming...');
+            
+            // Modern rpicam-apps libcamera-vid command with TCP streaming
+            // Note: We use H264 instead of MJPEG for better TCP streaming efficiency
             cameraProcess = spawn('libcamera-vid', [
-                '-t', '0',            // No timeout (this is the standard parameter)
-                '--width', width,     // Width
-                '--height', height,   // Height
-                '--framerate', fps,   // Lower framerate
-                '--inline',           // Enable inline headers for MJPEG
-                '--output', '-',      // Output to stdout
-                '--nopreview',        // Disable preview window
-                // Removed duplicate timeout parameter
-                '--segment', '1',     // Split output to reduce buffer size
-                '--codec', 'mjpeg'    // Use MJPEG codec to reduce CPU usage
+                '-t', '0',                // No timeout
+                '--width', width.toString(),     
+                '--height', height.toString(),   
+                '--framerate', fps.toString(),
+                '--codec', 'h264',        // H264 is more efficient for TCP streaming than MJPEG
+                '--bitrate', bitrate.toString(), // Set bitrate
+                '--profile', 'baseline',  // Use baseline profile for wider compatibility
+                '--level', '4',           // Compatibility level
+                '--intra', '15',          // I-frame interval
+                '--listen', '-',          // Output to TCP socket on standard port
+                '--nopreview',            // Disable preview window
+                '--autofocus-mode', 'continuous', // Continuous autofocus if supported
+                '--denoise', 'cdn_off',   // Disable denoising to reduce CPU load
+                '--brightness', '0.0',    // Neutral brightness
+                '--contrast', '1.0',      // Default contrast
+                '--saturation', '1.0',    // Default saturation
+                '--sharpness', '1.0',     // Default sharpness
+                '--ev', '0',              // Default exposure compensation
+                '--awb', 'auto',          // Auto white balance
+                '--flush',                // Flush buffers immediately
+                '--tuning-file', '/usr/share/libcamera/tuning/imx219.json', // Optional sensor-specific tuning
+                '--verbose', '0'          // Minimal verbosity to reduce log noise
             ]);
             
             // Track when the camera process started
             cameraProcess.startTime = Date.now();
         } else if (hasRaspivid) {
-            // Optimized raspivid command for resource efficiency
+            // Legacy raspivid fallback
+            logger.info('libcamera-vid not found, falling back to raspivid for TCP streaming...');
+            
             cameraProcess = spawn('raspivid', [
-                '-t', '0',            // No timeout
-                '-w', width,          // Width
-                '-h', height,         // Height
-                '-fps', fps,          // Lower framerate
-                '-pf', 'MJPEG',       // Use MJPEG format instead of H264
-                '-o', '-',            // Output to stdout
-                '-n',                 // No preview
-                '-fl',                // Flush buffers immediately
-                '-g', '15',           // I-frame every 15 frames (3 seconds)
-                '-b', '1000000'       // Limit bitrate to 1Mbps
+                '-t', '0',                // No timeout
+                '-w', width.toString(),   
+                '-h', height.toString(),  
+                '-fps', fps.toString(),   
+                '-o', '-',                // Output to stdout
+                '-pf', 'h264',            // H264 format for TCP
+                '-n',                     // No preview
+                '-b', bitrate.toString(), // Bitrate
+                '-ih',                    // Insert inline headers for streaming
+                '-g', '15',               // I-frame every 15 frames
+                '-fl',                    // Flush buffers immediately
+                '-stm',                   // Enable multicast streaming mode
+                '-awb', 'auto',           // Auto white balance
+                '-ex', 'auto',            // Auto exposure
+                '-drc', 'low',            // Dynamic range compression
+                '-rot', '0',              // No rotation
+                '-vs',                    // Turn on video stabilization if available
+                '-a', '4',                // Add time annotation
+                '-ae', '8'                // Add exposure annotation
             ]);
             
             // Track when the camera process started
             cameraProcess.startTime = Date.now();
         } else {
-            console.error('No camera tools found. Cannot start camera.');
+            logger.error('No rpicam-apps tools found. Cannot start camera for TCP streaming.');
             return;
         }
         
-        // Set up buffer handling to prevent memory issues
+        // Set up buffer handling to distribute to TCP clients
         if (cameraProcess.stdout) {
+            // Increase buffer size for stdout to prevent blocking
+            cameraProcess.stdout.setMaxListeners(50);
+            
+            // Handle standard output from camera process
+            cameraProcess.stdout.on('data', (data) => {
+                // Distribute data to all connected TCP clients
+                for (const socket of tcpStreamConnections) {
+                    // Only send if socket is still connected and writable
+                    if (socket.writable) {
+                        try {
+                            // If socket buffer is getting full, throttle sending
+                            if (socket.writableLength > 1024 * 1024) {
+                                logger.debug(`TCP socket buffer full (${socket.writableLength} bytes), dropping frame`);
+                                // Skip this socket for this frame
+                                continue;
+                            }
+                            
+                            socket.write(data);
+                        } catch (err) {
+                            logger.error(`Error sending camera data to TCP client: ${err.message}`);
+                            // Try to close socket if we can't write to it
+                            try {
+                                socket.end();
+                            } catch (e) {
+                                // Ignore close errors
+                            }
+                        }
+                    }
+                }
+                
+                // Also send to HTTP stream clients if needed via the existing mechanism
+                // (This maintains backward compatibility with HTTP clients)
+            });
+            
             cameraProcess.stdout.on('error', (err) => {
-                console.error('Camera stdout error:', err);
+                logger.error('Camera stdout error:', err);
                 stopCamera();
             });
         }
         
         // Log any stderr output from the camera process
         cameraProcess.stderr.on('data', (data) => {
-            console.error('Camera process error:', data.toString());
+            const stderr = data.toString();
+            // Only log if it's not a common warning message
+            if (!stderr.includes('ALSA lib') && !stderr.includes('No protocol specified')) {
+                logger.warn('Camera process stderr:', stderr);
+            }
         });
         
         // Set up automatic restart if camera freezes
@@ -689,60 +925,198 @@ function startCamera() {
                 // Check if process is still responsive
                 try {
                     if (cameraProcess.killed) {
-                        console.log('Camera process was killed, restarting...');
+                        logger.warn('Camera process was killed, restarting...');
                         clearInterval(cameraWatchdog);
                         stopCamera();
-                        setTimeout(startCamera, 1000);
+                        setTimeout(startCamera, 2000);
+                    }
+                    
+                    // Calculate uptime and restart if needed
+                    const uptimeMinutes = (Date.now() - cameraProcess.startTime) / 60000;
+                    if (uptimeMinutes > 60) { // Restart after 1 hour to prevent memory issues
+                        logger.info(`Camera running for ${uptimeMinutes.toFixed(1)} minutes, scheduled restart...`);
+                        clearInterval(cameraWatchdog);
+                        stopCamera();
+                        setTimeout(startCamera, 2000);
+                    }
+                    
+                    // Check if we have any TCP connections
+                    if (tcpStreamConnections.length > 0) {
+                        logger.debug(`Active TCP stream connections: ${tcpStreamConnections.length}`);
                     }
                 } catch (e) {
-                    console.error('Error checking camera process:', e);
+                    logger.error('Error checking camera process:', e);
                 }
             } else {
                 clearInterval(cameraWatchdog);
             }
-        }, 10000); // Check every 10 seconds
+        }, 30000); // Check every 30 seconds
         
         // Broadcast to all connected clients that camera is now active
         wss.clients.forEach(client => {
             client.send(JSON.stringify({
                 type: 'status',
-                message: 'Caméra activée'
+                message: 'Caméra activée (TCP streaming)'
+            }));
+            
+            // Send camera status update to all clients along with TCP stream info
+            client.send(JSON.stringify({
+                type: 'cameraStatus',
+                active: true,
+                available: true,
+                streamInfo: {
+                    type: 'tcp',
+                    host: server.address().address === '0.0.0.0' ? 'localhost' : server.address().address,
+                    port: STREAM_TCP_PORT,
+                    codec: 'h264'
+                }
             }));
         });
         
         isCameraActive = true;
         
         cameraProcess.on('error', (err) => {
-            console.error('Camera process error:', err);
+            logger.error('Camera process error:', err);
             isCameraActive = false;
+            
+            // Notify clients about camera error
+            wss.clients.forEach(client => {
+                client.send(JSON.stringify({
+                    type: 'status',
+                    message: `Erreur caméra: ${err.message}`
+                }));
+            });
         });
         
         cameraProcess.on('exit', (code) => {
-            console.log(`Camera process exited with code ${code}`);
+            logger.info(`Camera process exited with code ${code}`);
             isCameraActive = false;
+            
+            // Close all TCP connections when camera exits
+            tcpStreamConnections.forEach(socket => {
+                try {
+                    socket.end();
+                } catch (e) {
+                    // Ignore close errors
+                }
+            });
+            
+            // Clear connection array
+            tcpStreamConnections = [];
+            
+            // Attempt to restart if unexpected exit
+            if (code !== 0 && !cameraProcess.manualStop) {
+                logger.warn('Camera process exited unexpectedly, attempting restart...');
+                setTimeout(startCamera, 5000);
+            }
         });
         
     } catch (error) {
-        console.error('Error starting camera:', error);
+        logger.error('Error starting camera:', error);
         isCameraActive = false;
     }
 }
 
 function stopCamera() {
     if (cameraProcess && isCameraActive) {
-        console.log('Stopping camera stream...');
-        cameraProcess.kill();
-        cameraProcess = null;
-        isCameraActive = false;
+        logger.info('Stopping camera TCP stream...');
         
-        // Broadcast to all connected clients that camera is now inactive
-        wss.clients.forEach(client => {
-            client.send(JSON.stringify({
-                type: 'status',
-                message: 'Caméra désactivée'
-            }));
-        });
+        // Mark this as a manual stop to prevent auto-restart
+        cameraProcess.manualStop = true;
+        
+        // Close all TCP connections first
+        if (tcpStreamConnections.length > 0) {
+            logger.info(`Closing ${tcpStreamConnections.length} TCP stream connections`);
+            tcpStreamConnections.forEach(socket => {
+                try {
+                    socket.end();
+                } catch (e) {
+                    // Ignore close errors
+                }
+            });
+            
+            // Clear connection array
+            tcpStreamConnections = [];
+        }
+        
+        // Give process time to clean up resources
+        const gracefulShutdown = setTimeout(() => {
+            try {
+                // Force kill if still running after timeout
+                if (cameraProcess) {
+                    logger.warn('Camera process did not exit gracefully, forcing termination');
+                    cameraProcess.kill('SIGKILL');
+                }
+            } catch (e) {
+                logger.error('Error killing camera process:', e);
+            }
+            
+            // Make sure we clean up
+            finishCameraShutdown();
+        }, 2000);
+        
+        // Try graceful shutdown first
+        try {
+            cameraProcess.kill('SIGTERM');
+            
+            // Listen for actual process exit
+            cameraProcess.once('exit', () => {
+                clearTimeout(gracefulShutdown);
+                logger.info('Camera process exited gracefully');
+                finishCameraShutdown();
+            });
+        } catch (e) {
+            logger.error('Error during graceful camera shutdown:', e);
+            clearTimeout(gracefulShutdown);
+            
+            // Force kill as fallback
+            try {
+                cameraProcess.kill('SIGKILL');
+            } catch (innerErr) {
+                logger.error('Failed to force kill camera process:', innerErr);
+            }
+            
+            finishCameraShutdown();
+        }
     }
+}
+
+// Helper function to finish camera shutdown
+function finishCameraShutdown() {
+    cameraProcess = null;
+    isCameraActive = false;
+    
+    // Broadcast to all connected clients that camera is now inactive
+    wss.clients.forEach(client => {
+        client.send(JSON.stringify({
+            type: 'status',
+            message: 'Caméra désactivée'
+        }));
+        
+        // Send updated camera status
+        client.send(JSON.stringify({
+            type: 'cameraStatus',
+            active: false,
+            available: isRaspberryPi,
+            streamInfo: null
+        }));
+    });
+    
+    // Consider shutting down TCP server if no active camera for 2 minutes
+    setTimeout(() => {
+        if (!isCameraActive && tcpStreamServer) {
+            logger.info('No active camera for 2 minutes, shutting down TCP stream server');
+            try {
+                tcpStreamServer.close(() => {
+                    logger.info('TCP stream server shut down successfully');
+                    tcpStreamServer = null;
+                });
+            } catch (e) {
+                logger.error('Error shutting down TCP stream server:', e);
+                tcpStreamServer = null;
+            }
+        }
+    }, 120000); // 2 minutes
 }
 
 // Define PORT before WebSocket server

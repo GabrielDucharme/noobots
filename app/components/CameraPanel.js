@@ -1,18 +1,21 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import JSMpegPlayer from './JSMpegPlayer'; // We'll create this component next
 
 export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
     const [isCameraAvailable, setIsCameraAvailable] = useState(false);
     const [isCameraActive, setIsCameraActive] = useState(false);
     const [streamUrl, setStreamUrl] = useState('');
     const [snapshotUrl, setSnapshotUrl] = useState('');
+    const [tcpStreamInfo, setTcpStreamInfo] = useState(null);
     const [testImageUrl, setTestImageUrl] = useState('');
     const [isLoading, setIsLoading] = useState(true);
     const [refreshKey, setRefreshKey] = useState(Date.now());
     
-    // Start with snapshot mode - not streaming - to simplify debugging
-    const [useStreamingMode, setUseStreamingMode] = useState(false);
+    // Default to TCP streaming if available
+    const [useStreamingMode, setUseStreamingMode] = useState(true);
+    const [streamMode, setStreamMode] = useState('tcp'); // 'tcp', 'http', or 'snapshot'
     
     const [streamError, setStreamError] = useState(false);
     const [snapshotError, setSnapshotError] = useState(false);
@@ -22,6 +25,7 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
     const [debugInfo, setDebugInfo] = useState('No image loaded yet');
     const snapshotTimerRef = useRef(null);
     const videoRef = useRef(null);
+    const playerRef = useRef(null);
     
     // Function to force refresh the camera stream
     const refreshStream = () => {
@@ -29,9 +33,19 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
         setStreamError(false);
         setRefreshKey(Date.now());
         
-        // Toggle between streaming and snapshot modes
+        // Try TCP mode first, fall back to HTTP or snapshot if needed
         if (streamError) {
-            setUseStreamingMode(!useStreamingMode);
+            // Cycle through modes: tcp -> http -> snapshot -> tcp
+            if (streamMode === 'tcp') {
+                setStreamMode('http');
+                setUseStreamingMode(true);
+            } else if (streamMode === 'http') {
+                setStreamMode('snapshot');
+                setUseStreamingMode(false);
+            } else {
+                setStreamMode('tcp');
+                setUseStreamingMode(true);
+            }
         }
     };
 
@@ -45,14 +59,17 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                 // Extract host and protocol from WebSocket URL
                 let host = serverHost;
                 let baseUrl;
+                let tcpHost; // For TCP connections
                 
                 // Handle ngrok URLs properly
                 if (host.includes('ngrok')) {
                     // If using ngrok, keep the full URL path
                     if (host.startsWith('ws://')) {
                         host = host.replace('ws://', 'http://');
+                        tcpHost = host.replace('ws://', '');
                     } else if (host.startsWith('wss://')) {
                         host = host.replace('wss://', 'https://');
+                        tcpHost = host.replace('wss://', '');
                     }
                     // Use the same ngrok domain but different endpoint
                     baseUrl = host;
@@ -60,23 +77,44 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                     // Normal handling for direct connections
                     if (host.startsWith('ws://')) {
                         host = host.replace('ws://', 'http://');
+                        tcpHost = host.replace('ws://', '').split('/')[0]; // Just host:port
                     } else if (host.startsWith('wss://')) {
                         host = host.replace('wss://', 'https://');
+                        tcpHost = host.replace('wss://', '').split('/')[0]; // Just host:port
                     }
                     
                     // Remove any path and just keep the host:port
                     const urlParts = host.split('/');
                     baseUrl = urlParts[0];
+                    
+                    // For local connections, use localhost for TCP
+                    if (tcpHost.includes('localhost') || tcpHost.includes('127.0.0.1')) {
+                        // Already localhost, keep as is
+                    } else if (tcpHost.includes('0.0.0.0')) {
+                        // Replace 0.0.0.0 with localhost
+                        tcpHost = tcpHost.replace('0.0.0.0', 'localhost');
+                    }
                 }
                 
+                // For HTTP streaming and snapshots
                 setStreamUrl(`${baseUrl}/camera/stream`);
                 setSnapshotUrl(`${baseUrl}/camera/snapshot`);
                 setTestImageUrl(`${baseUrl}/camera/test-image`);
                 
+                // For TCP streaming (use a different port, configured in the server)
+                // We'll get the actual port from the server via cameraStatus message
+                const tcpPort = 3002; // Default port, will be overridden by server message
+                setTcpStreamInfo({
+                    host: tcpHost,
+                    port: tcpPort,
+                    codec: 'h264'
+                });
+                
                 console.log('Camera URLs set:', {
                     stream: `${baseUrl}/camera/stream`,
                     snapshot: `${baseUrl}/camera/snapshot`,
-                    testImage: `${baseUrl}/camera/test-image`
+                    testImage: `${baseUrl}/camera/test-image`,
+                    tcpStream: `tcp://${tcpHost}:${tcpPort}`
                 });
                 
                 // Try to load the test image to ensure connectivity
@@ -94,6 +132,17 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
         } else {
             setIsCameraAvailable(false);
             setIsCameraActive(false);
+            setTcpStreamInfo(null);
+            
+            // Clean up any active players/timers
+            if (playerRef.current) {
+                try {
+                    playerRef.current.destroy();
+                    playerRef.current = null;
+                } catch (e) {
+                    console.error('Error destroying video player:', e);
+                }
+            }
             
             // Clear snapshot timer when disconnected
             if (snapshotTimerRef.current) {
@@ -111,20 +160,40 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
             setIsCameraActive(message.active);
             setIsLoading(false);
             
+            // Check for TCP stream info and update if available
+            if (message.streamInfo) {
+                console.log('Received TCP stream info:', message.streamInfo);
+                setTcpStreamInfo(message.streamInfo);
+                
+                // If TCP stream is available, default to TCP mode
+                if (message.streamInfo.type === 'tcp') {
+                    setStreamMode('tcp');
+                    setUseStreamingMode(true);
+                }
+            }
+            
             // Setup based on camera status
             if (message.active) {
                 // Log that camera is active
-                console.log('CAMERA IS ACTIVE - Taking first snapshot...');
-                setDebugInfo(`Camera active at ${new Date().toLocaleTimeString()} - Taking snapshot...`);
+                console.log('CAMERA IS ACTIVE - Starting appropriate stream mode...');
+                
+                // Choose appropriate stream mode based on availability
+                if (tcpStreamInfo && streamMode === 'tcp') {
+                    setDebugInfo(`TCP camera stream active at ${new Date().toLocaleTimeString()}`);
+                    setUseStreamingMode(true);
+                } else if (streamMode === 'http') {
+                    setDebugInfo(`HTTP camera stream active at ${new Date().toLocaleTimeString()}`);
+                    setUseStreamingMode(true);
+                } else {
+                    setDebugInfo(`Camera active at ${new Date().toLocaleTimeString()} - Taking snapshot...`);
+                    setUseStreamingMode(false);
+                }
                 
                 // Force refresh with a cache-busting parameter
                 setRefreshKey(Date.now());
                 setStreamError(false);
                 
-                // We intentionally don't set up automatic snapshots initially
-                // Let's first see if we can get a single image properly displayed
-                // If we get successful images, then we can consider auto-refresh
-                
+                // For snapshot mode, set up auto-refresh after success
                 if (successfulImageLoads >= 3 && !useStreamingMode && !snapshotTimerRef.current) {
                     console.log('Setting up auto-refresh after 3 successful loads');
                     snapshotTimerRef.current = setInterval(() => {
@@ -133,11 +202,23 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                     }, 3000); // Update every 3 seconds
                 }
             } else {
-                // Clear snapshot timer when camera is inactive
+                // Clean up when camera is inactive
                 if (snapshotTimerRef.current) {
                     clearInterval(snapshotTimerRef.current);
                     snapshotTimerRef.current = null;
                 }
+                
+                // Clean up TCP player if active
+                if (playerRef.current) {
+                    try {
+                        playerRef.current.destroy();
+                        playerRef.current = null;
+                    } catch (e) {
+                        console.error('Error destroying video player:', e);
+                    }
+                }
+                
+                setDebugInfo('Camera inactive');
             }
         }
     };
@@ -236,54 +317,106 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                         {isCameraActive ? (
                             <>
                                 {useStreamingMode ? (
-                                    // Stream mode with auto-recovery
-                                    <div className="relative">
-                                        <img 
-                                            key={`camera-stream-${refreshKey}`}
-                                            src={`${streamUrl}?t=${refreshKey}`}
-                                            className="w-full h-auto max-h-[400px] object-contain"
-                                            alt="Camera stream"
-                                            style={{ minHeight: '240px', background: '#1a1a1a' }}
-                                            onLoad={() => {
-                                                // Reset stream error state when stream loads successfully
-                                                if (streamError) {
+                                    streamMode === 'tcp' && tcpStreamInfo ? (
+                                        // TCP streaming mode with JSMpeg
+                                        <div className="relative">
+                                            <JSMpegPlayer
+                                                ref={playerRef}
+                                                tcpInfo={tcpStreamInfo}
+                                                className="w-full h-auto max-h-[400px]"
+                                                style={{ minHeight: '240px', background: '#1a1a1a' }}
+                                                onConnect={() => {
+                                                    console.log('TCP stream connected successfully');
                                                     setStreamError(false);
-                                                }
-                                            }}
-                                            onError={(e) => {
-                                                console.error('Failed to load camera stream:', e);
-                                                setStreamError(true);
-                                                
-                                                // After three consecutive stream errors, switch to snapshot mode
-                                                if (streamError && successfulImageLoads === 0) {
-                                                    console.log('Multiple stream errors, switching to snapshot mode');
-                                                    setUseStreamingMode(false);
+                                                    setDebugInfo(`TCP stream connected at ${new Date().toLocaleTimeString()}`);
+                                                }}
+                                                onError={(err) => {
+                                                    console.error('TCP stream error:', err);
+                                                    setStreamError(true);
+                                                    setDebugInfo(`TCP error: ${err}`);
                                                     
-                                                    // Start snapshot timer if not already running
-                                                    if (!snapshotTimerRef.current) {
-                                                        snapshotTimerRef.current = setInterval(() => {
-                                                            setRefreshKey(Date.now());
-                                                        }, 2000);
-                                                    }
-                                                } else {
-                                                    // Try to recover the stream with a new connection
+                                                    // After TCP errors, fall back to HTTP streaming
                                                     setTimeout(() => {
-                                                        if (useStreamingMode) {
-                                                            console.log('Attempting stream recovery...');
+                                                        if (streamMode === 'tcp' && streamError) {
+                                                            console.log('TCP stream error, falling back to HTTP stream');
+                                                            setStreamMode('http');
                                                             setRefreshKey(Date.now());
                                                         }
                                                     }, 3000);
-                                                }
-                                            }}
-                                        />
-                                        
-                                        {/* Auto-recovery overlay */}
-                                        {streamError && (
-                                            <div className="absolute top-0 right-0 bg-black bg-opacity-70 px-2 py-1 text-xs text-yellow-300">
-                                                Récupération...
+                                                }}
+                                                refreshKey={refreshKey}
+                                            />
+                                            
+                                            {/* TCP debug overlay */}
+                                            <div className="absolute top-0 left-0 bg-black bg-opacity-70 px-2 py-1 m-2 text-xs text-blue-300 z-10 rounded">
+                                                {debugInfo}
                                             </div>
-                                        )}
-                                    </div>
+                                            
+                                            {/* Auto-recovery overlay */}
+                                            {streamError && (
+                                                <div className="absolute top-0 right-0 bg-black bg-opacity-70 px-2 py-1 text-xs text-yellow-300">
+                                                    Reconnexion TCP...
+                                                </div>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        // HTTP stream mode with auto-recovery
+                                        <div className="relative">
+                                            <img 
+                                                key={`camera-stream-${refreshKey}`}
+                                                src={`${streamUrl}?t=${refreshKey}`}
+                                                className="w-full h-auto max-h-[400px] object-contain"
+                                                alt="Camera stream"
+                                                style={{ minHeight: '240px', background: '#1a1a1a' }}
+                                                onLoad={() => {
+                                                    // Reset stream error state when stream loads successfully
+                                                    if (streamError) {
+                                                        setStreamError(false);
+                                                    }
+                                                    setDebugInfo(`HTTP stream loaded at ${new Date().toLocaleTimeString()}`);
+                                                }}
+                                                onError={(e) => {
+                                                    console.error('Failed to load HTTP camera stream:', e);
+                                                    setStreamError(true);
+                                                    setDebugInfo(`HTTP stream error at ${new Date().toLocaleTimeString()}`);
+                                                    
+                                                    // After consecutive errors, try other modes
+                                                    if (streamError && streamMode === 'http') {
+                                                        console.log('Multiple HTTP stream errors, switching to snapshot mode');
+                                                        setStreamMode('snapshot');
+                                                        setUseStreamingMode(false);
+                                                        
+                                                        // Start snapshot timer if not already running
+                                                        if (!snapshotTimerRef.current) {
+                                                            snapshotTimerRef.current = setInterval(() => {
+                                                                setRefreshKey(Date.now());
+                                                            }, 2000);
+                                                        }
+                                                    } else {
+                                                        // Try to recover the HTTP stream with a new connection
+                                                        setTimeout(() => {
+                                                            if (useStreamingMode && streamMode === 'http') {
+                                                                console.log('Attempting HTTP stream recovery...');
+                                                                setRefreshKey(Date.now());
+                                                            }
+                                                        }, 3000);
+                                                    }
+                                                }}
+                                            />
+                                            
+                                            {/* HTTP debug overlay */}
+                                            <div className="absolute top-0 left-0 bg-black bg-opacity-70 px-2 py-1 m-2 text-xs text-green-300 z-10 rounded">
+                                                {debugInfo}
+                                            </div>
+                                            
+                                            {/* Auto-recovery overlay */}
+                                            {streamError && (
+                                                <div className="absolute top-0 right-0 bg-black bg-opacity-70 px-2 py-1 text-xs text-yellow-300">
+                                                    Récupération HTTP...
+                                                </div>
+                                            )}
+                                        </div>
+                                    )
                                 ) : (
                                     // Choose between snapshot mode or fallback mode
                                     <div className="relative" style={{ minHeight: '240px' }}>
@@ -399,8 +532,9 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                                 )}
                                 
                                 <div className="absolute bottom-2 right-2 bg-black bg-opacity-70 px-2 py-1 rounded text-xs text-white">
-                                    {useStreamingMode ? 'Mode: Stream' : 
-                                     useFallbackMode ? 'Mode: Test Image' : 'Mode: Snapshots'} | 
+                                    {useStreamingMode 
+                                      ? (streamMode === 'tcp' ? 'Mode: TCP Stream' : 'Mode: HTTP Stream') 
+                                      : (useFallbackMode ? 'Mode: Test Image' : 'Mode: Snapshots')} | 
                                     <button 
                                         onClick={() => {
                                             // If in fallback mode, toggle between fallback and snapshot mode
@@ -410,23 +544,37 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                                                 return;
                                             }
                                             
-                                            // Otherwise toggle between stream and snapshot modes
-                                            setUseStreamingMode(!useStreamingMode);
-                                            setRefreshKey(Date.now());
-                                            
-                                            // Manage snapshot timer based on mode
-                                            if (useStreamingMode) {
+                                            // Cycle through available modes: TCP -> HTTP -> Snapshot -> TCP
+                                            if (useStreamingMode && streamMode === 'tcp') {
+                                                // Switch from TCP to HTTP
+                                                setStreamMode('http');
+                                                setUseStreamingMode(true);
+                                            } else if (useStreamingMode && streamMode === 'http') {
+                                                // Switch from HTTP to snapshot
+                                                setStreamMode('snapshot');
+                                                setUseStreamingMode(false);
+                                                // Start snapshot timer
                                                 if (!snapshotTimerRef.current) {
                                                     snapshotTimerRef.current = setInterval(() => {
                                                         setRefreshKey(Date.now());
                                                     }, 2000);
                                                 }
                                             } else {
+                                                // Switch from snapshot back to TCP if available, otherwise HTTP
+                                                if (tcpStreamInfo) {
+                                                    setStreamMode('tcp');
+                                                } else {
+                                                    setStreamMode('http');
+                                                }
+                                                setUseStreamingMode(true);
+                                                // Clear snapshot timer
                                                 if (snapshotTimerRef.current) {
                                                     clearInterval(snapshotTimerRef.current);
                                                     snapshotTimerRef.current = null;
                                                 }
                                             }
+                                            
+                                            setRefreshKey(Date.now());
                                         }}
                                         className="ml-2 underline"
                                     >
@@ -442,6 +590,18 @@ export default function CameraPanel({ isConnected, sendCommand, serverHost }) {
                                             title="Use test image if camera not working"
                                         >
                                             Test
+                                        </button>
+                                    )}
+                                    {useStreamingMode && streamMode === 'http' && tcpStreamInfo && (
+                                        <button 
+                                            onClick={() => {
+                                                setStreamMode('tcp');
+                                                setRefreshKey(Date.now());
+                                            }}
+                                            className="ml-2 text-cyan-300 underline"
+                                            title="Switch to TCP streaming"
+                                        >
+                                            TCP
                                         </button>
                                     )}
                                 </div>
