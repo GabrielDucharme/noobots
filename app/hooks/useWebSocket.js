@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 
 const RECONNECT_DELAY = 3000; // 3 seconds
+const CONNECTION_REFRESH_INTERVAL = 30000; // 30 seconds - how often to check for updated connection info
 
 const useWebSocket = () => {
     const [socket, setSocket] = useState(null);
@@ -13,31 +14,99 @@ const useWebSocket = () => {
         temperature: 'N/A'
     });
     const [statusMessage, setStatusMessage] = useState('');
+    const [serverHost, setServerHost] = useState(null);
+    const [tcpStreamInfo, setTcpStreamInfo] = useState(null);
     const reconnectTimeoutRef = useRef(null);
+    const refreshIntervalRef = useRef(null);
+    const connectionInfoRef = useRef(null);
 
-    const connect = useCallback((customUrl = null) => {
+    // Function to fetch the latest connection info from our API
+    const fetchConnectionInfo = useCallback(async () => {
         try {
-            // Get WebSocket URL from custom input, environment, or fallback to auto-detection
+            // Skip API call during SSR
+            if (typeof window === 'undefined') return null;
+            
+            // Fetch the latest connection details
+            const response = await fetch('/api/connection');
+            if (!response.ok) {
+                throw new Error(`Failed to fetch connection info: ${response.status}`);
+            }
+            
+            const data = await response.json();
+            connectionInfoRef.current = data;
+            
+            // Return the connection info
+            return data;
+        } catch (error) {
+            console.error('Error fetching connection info:', error);
+            return null;
+        }
+    }, []);
+
+    const connect = useCallback(async (customUrl = null) => {
+        try {
+            // Get WebSocket URL, prioritizing in this order:
+            // 1. Custom URL passed to this function
+            // 2. API-provided URL (from our Raspberry Pi)
+            // 3. Environment variable
+            // 4. Stored in localStorage
+            // 5. Auto-detect from current location
+            
             let wsUrl;
+            let apiConnectionInfo = null;
+            
+            // First try to get connection info from our API
+            if (!customUrl) {
+                apiConnectionInfo = await fetchConnectionInfo();
+                if (apiConnectionInfo?.wsUrl) {
+                    wsUrl = apiConnectionInfo.wsUrl;
+                    console.log('Using API-provided WebSocket URL:', wsUrl);
+                    
+                    // Update TCP stream info if available
+                    if (apiConnectionInfo.tcpUrl) {
+                        // Parse TCP URL (tcp://host:port)
+                        const tcpUrl = apiConnectionInfo.tcpUrl;
+                        const tcpUrlParts = tcpUrl.replace('tcp://', '').split(':');
+                        
+                        setTcpStreamInfo({
+                            host: tcpUrlParts[0],
+                            port: parseInt(tcpUrlParts[1], 10),
+                            codec: 'h264'
+                        });
+                        
+                        console.log('Updated TCP stream info:', {
+                            host: tcpUrlParts[0],
+                            port: parseInt(tcpUrlParts[1], 10)
+                        });
+                    }
+                }
+            }
+            
+            // If no API URL or we have a custom one, fall back to other methods
             if (customUrl) {
                 wsUrl = customUrl;
-            } else if (process.env.NEXT_PUBLIC_WS_URL) {
-                wsUrl = process.env.NEXT_PUBLIC_WS_URL;
-            } else if (typeof window !== 'undefined' && localStorage.getItem('noobots_ws_url')) {
-                wsUrl = localStorage.getItem('noobots_ws_url');
-            } else if (typeof window !== 'undefined') {
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const host = window.location.hostname;
-                wsUrl = `${protocol}//${host}:3001`;
-            } else {
-                // Fallback for server-side rendering
-                wsUrl = 'ws://localhost:3001';
+            } else if (!wsUrl) {
+                if (process.env.NEXT_PUBLIC_WS_URL) {
+                    wsUrl = process.env.NEXT_PUBLIC_WS_URL;
+                } else if (typeof window !== 'undefined' && localStorage.getItem('noobots_ws_url')) {
+                    wsUrl = localStorage.getItem('noobots_ws_url');
+                } else if (typeof window !== 'undefined') {
+                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    const host = window.location.hostname;
+                    wsUrl = `${protocol}//${host}:3001`;
+                } else {
+                    // Fallback for server-side rendering
+                    wsUrl = 'ws://localhost:3001';
+                }
             }
 
             // Save URL to localStorage for future use
             if (customUrl && typeof window !== 'undefined') {
                 localStorage.setItem('noobots_ws_url', customUrl);
             }
+            
+            // Save the server host for other components to use
+            setServerHost(wsUrl);
 
             // Add connection debug info to UI
             setStatusMessage(`Connexion à: ${wsUrl}`);
@@ -99,7 +168,7 @@ const useWebSocket = () => {
                 if (reconnectTimeoutRef.current) {
                     clearTimeout(reconnectTimeoutRef.current);
                 }
-                reconnectTimeoutRef.current = setTimeout(connect, RECONNECT_DELAY);
+                reconnectTimeoutRef.current = setTimeout(() => connect(), RECONNECT_DELAY);
             };
 
             ws.onerror = (error) => {
@@ -113,25 +182,43 @@ const useWebSocket = () => {
             setStatusMessage(`Failed to create WebSocket connection: ${error.message}`);
             return null;
         }
-    }, []);
+    }, [fetchConnectionInfo]);
 
+    // Set up initial connection and fetch API connection info periodically
     useEffect(() => {
-        // Only connect on the client side
-        if (typeof window !== 'undefined') {
-            const ws = connect();
+        // Only run on client side
+        if (typeof window === 'undefined') return;
+        
+        // Start a connection
+        const ws = connect();
+        
+        // Set up periodic refresh of connection info
+        refreshIntervalRef.current = setInterval(async () => {
+            const info = await fetchConnectionInfo();
+            
+            // Only reconnect if the API URL is different from current
+            if (info?.wsUrl && info.wsUrl !== connectionInfoRef.current?.wsUrl && ws) {
+                console.log('Connection info changed, reconnecting...');
+                ws.close(); // This will trigger reconnect via onclose handler
+            }
+        }, CONNECTION_REFRESH_INTERVAL);
 
-            return () => {
-                if (reconnectTimeoutRef.current) {
-                    clearTimeout(reconnectTimeoutRef.current);
-                }
-                if (ws) {
-                    ws.send(JSON.stringify({ type: 'stopStatsMonitoring' }));
-                    ws.close();
-                }
-            };
-        }
-        return () => {};
-    }, [connect]);
+        // Clean up
+        return () => {
+            if (reconnectTimeoutRef.current) {
+                clearTimeout(reconnectTimeoutRef.current);
+            }
+            
+            if (refreshIntervalRef.current) {
+                clearInterval(refreshIntervalRef.current);
+            }
+            
+            if (ws) {
+                ws.send(JSON.stringify({ type: 'stopStatsMonitoring' }));
+                ws.close();
+            }
+        };
+    }, [connect, fetchConnectionInfo]);
 
     const sendCommand = useCallback((command) => {
         if (socket && socket.readyState === WebSocket.OPEN) {
@@ -142,24 +229,14 @@ const useWebSocket = () => {
         }
     }, [socket]);
 
-    // Generate the wsUrl safely for both client and server environments
-    const getWsUrl = () => {
-        if (typeof window === 'undefined') {
-            return process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001';
-        }
-        
-        return localStorage.getItem('noobots_ws_url') || 
-               process.env.NEXT_PUBLIC_WS_URL || 
-               `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}://${window.location.hostname}:3001`;
-    };
-
     return {
         isConnected,
         systemStats,
         statusMessage,
         sendCommand,
         connect,
-        wsUrl: getWsUrl()
+        serverHost,
+        tcpStreamInfo
     };
 };
 
