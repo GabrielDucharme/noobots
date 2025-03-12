@@ -1,14 +1,40 @@
-import { dirname } from "path";
-import { fileURLToPath } from "url";
-import { FlatCompat } from "@eslint/eslintrc";
+// This is a simplified ESLint config for Next.js without using FlatCompat
+import nextPlugin from '@next/eslint-plugin-next';
+import js from '@eslint/js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+export default [
+  // Use ESLint's recommended rules
+  js.configs.recommended,
+  
+  // Add Next.js specific rules
+  {
+    plugins: {
+      '@next/next': nextPlugin
+    },
+    rules: {
+      // Add commonly used Next.js rules
+      '@next/next/no-img-element': 'warn',
+      '@next/next/no-html-link-for-pages': 'warn'
+    }
+  },
 
-const compat = new FlatCompat({
-  baseDirectory: __dirname,
-});
+  // Specify global settings
+  {
+    ignores: [
+      'node_modules/**',
+      '.next/**',
+      'out/**',
+      '.vercel/**',
+      'public/**'
+    ]
+  },
 
-const eslintConfig = [...compat.extends("next/core-web-vitals")];
-
-export default eslintConfig;
+  // Configurations for specific files
+  {
+    files: ['**/*.js', '**/*.jsx', '**/*.ts', '**/*.tsx', '**/*.mjs'],
+    rules: {
+      'no-unused-vars': 'warn',
+      'no-console': ['warn', { allow: ['warn', 'error', 'info'] }]
+    }
+  }
+];

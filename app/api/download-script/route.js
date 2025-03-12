@@ -2,6 +2,10 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 
+// Add this for static export compatibility
+export const dynamic = 'force-static';
+export const revalidate = false;
+
 // This API endpoint will allow downloading the setup script for the Raspberry Pi
 export async function GET() {
   try {

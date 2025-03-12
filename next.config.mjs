@@ -10,10 +10,17 @@ const nextConfig = {
     experimental: {
         serverActions: true,
     },
-    // Enable static exports for deployment platforms that need it
-    output: 'export',
-    // Disable server-side image optimization since we're using static export
-    images: { unoptimized: true },
+    // Configure for dynamic API routes while keeping static where possible
+    // Use 'standalone' instead of 'export' for hybrid approach
+    output: 'standalone',
+    // Config for image optimization
+    images: { 
+        domains: ['localhost'],
+        formats: ['image/avif', 'image/webp'],
+    },
+    // These options help with API route handling
+    skipTrailingSlashRedirect: true,
+    skipMiddlewareUrlNormalize: true,
 };
 
 export default nextConfig;

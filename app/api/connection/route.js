@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { kv } from '@vercel/kv'; // We'll use Vercel KV instead of Edge Config as it's more stable
 
+// This route can't be static since it uses dynamic data from KV
+export const dynamic = 'force-dynamic';
+
 export async function GET() {
   try {
     // Get connection info from KV store
