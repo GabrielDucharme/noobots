@@ -1,6 +1,6 @@
 # Noobots - Simple Setup Instructions
 
-Just a few quick steps to get your Raspberry Pi connected with automatic TCP streaming\!
+Just a few quick steps to get your Raspberry Pi connected with automatic TCP streaming!
 
 ## Step-by-Step Setup (5 minutes)
 
@@ -11,7 +11,7 @@ Just a few quick steps to get your Raspberry Pi connected with automatic TCP str
    cd ~/noobots-setup
    
    # Download the setup script
-   curl -O https://noobots.vercel.app/api/download-script
+   curl -O https://your-deployment-url.com/api/download-script
    
    # Make it executable
    chmod +x setup-pi.sh
@@ -21,28 +21,43 @@ Just a few quick steps to get your Raspberry Pi connected with automatic TCP str
    ```
 
 2. **When prompted**, enter:
-   - URL: `https://noobots.vercel.app`
+   - URL: Enter your deployment URL (e.g., `https://your-noobots-app.vercel.app`)
 
 3. **IMPORTANT**: The script will generate an API key
-   - Copy this API key and send it to me
-   - I'll add it to the app configuration
-   - Once I confirm it's added, you're all set\!
+   - Copy this API key
+   - Add it to your deployment as an environment variable named `NOOBOTS_API_KEY`
+   - For Vercel: Go to Project Settings → Environment Variables → Add `NOOBOTS_API_KEY`
+   - Redeploy your app for the key to take effect
 
-4. **That's it\!** The service will:
+4. **That's it!** The service will:
    - Start automatically when your Pi boots up
    - Connect to the app with TCP streaming
-   - No more manual URL sharing needed\!
+   - No more manual URL sharing needed!
 
-## If You Need to Stop/Start:
+## Managing Your Pi Service:
 
 - **Check status**: `sudo systemctl status noobots`
 - **Start**: `sudo systemctl start noobots`
 - **Stop**: `sudo systemctl stop noobots`
 - **See logs**: `sudo journalctl -u noobots -f`
+- **Detailed logs**: `cat /opt/noobots/server.log`
 
-## Having issues?
+## Having Issues?
 
+### Camera Problems
 - Check camera is enabled: `sudo raspi-config` → Interface Options → Camera
-- Check camera connection: `vcgencmd get_camera`
-- Check logs: `cat /opt/noobots/server.log`
-- Let me know if you need help\!
+- Check camera connection: `vcgencmd get_camera` (should show `supported=1 detected=1`)
+- Try replacing camera ribbon cable if detected=0
+- For libcamera issues: `libcamera-still --list-cameras`
+
+### Connection Problems
+- Verify internet connection: `ping google.com`
+- Check ngrok tunnels: `curl http://localhost:4040/api/tunnels`
+- Ensure API key matches the one in your Vercel environment
+- Try restarting the service: `sudo systemctl restart noobots`
+
+### Performance Issues
+- For smoother video: `sudo systemctl stop noobots && sudo /opt/noobots/start-noobots.sh --resolution 640x480`
+- For CPU usage concerns: `sudo systemctl stop noobots && sudo /opt/noobots/start-noobots.sh --framerate 15`
+
+If you continue to have issues, check the detailed logs and share them with the team for support.

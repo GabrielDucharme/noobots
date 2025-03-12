@@ -10,16 +10,22 @@ noobots provides a simple web interface to monitor and control your Raspberry Pi
 - **Auto-Connection**: Raspberry Pi automatically connects to the app using ngrok tunnels
 - **Simple Setup**: One-time setup process with automatic startup on boot
 
-## Quick Setup (Raspberry Pi)
+## Quick Setup
 
-1. **Run these commands on your Raspberry Pi**:
+### 1. Deploy the web app
+
+Deploy to Vercel or your preferred hosting platform. See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed instructions.
+
+### 2. Set up your Raspberry Pi
+
+1. **Run these commands on your Pi**:
    ```bash
    # Create a directory
    mkdir -p ~/noobots-setup
    cd ~/noobots-setup
    
-   # Download the setup script
-   curl -O https://noobots.vercel.app/api/download-script
+   # Download the setup script from your deployment
+   curl -O https://your-deployment-url.com/api/download-script
    
    # Make it executable
    chmod +x setup-pi.sh
@@ -28,18 +34,22 @@ noobots provides a simple web interface to monitor and control your Raspberry Pi
    sudo ./setup-pi.sh
    ```
 
-2. **When prompted**, enter:
-   - URL: `https://noobots.vercel.app` (or your deployed app URL)
+2. **When prompted, enter your deployment URL**
 
-3. **IMPORTANT**: The script will generate an API key
-   - Copy this API key and add it to your app configuration
+3. **Important**: The script will generate an API key
+   - Copy this API key
+   - Add it to your deployment as an environment variable named `NOOBOTS_API_KEY`
+   - Redeploy your app
 
-4. **That's it!** The service will:
-   - Start automatically when your Pi boots up
-   - Connect to the app with TCP streaming
+4. **That's it!** Your Pi will automatically:
+   - Connect to your app with TCP streaming
+   - Start the service on boot
    - No manual URL sharing needed
 
-For more detailed setup instructions, see [RASPBERRY_PI_GUIDE.md](RASPBERRY_PI_GUIDE.md).
+For more detailed instructions:
+- [SIMPLE_SETUP_INSTRUCTIONS.md](SIMPLE_SETUP_INSTRUCTIONS.md) - Quick Pi setup guide
+- [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) - Development documentation
+- [RASPBERRY_PI_GUIDE.md](RASPBERRY_PI_GUIDE.md) - Detailed Pi configuration
 
 ## Development Setup
 

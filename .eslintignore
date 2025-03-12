@@ -1,0 +1,24 @@
+# Node modules
+node_modules/
+
+# Build output
+.next/
+out/
+dist/
+build/
+
+# Public assets
+public/
+
+# Config files
+postcss.config.mjs
+tailwind.config.mjs
+
+# Server scripts
+scripts/
+server.js
+
+# Environment files
+.env
+.env.*
+!.env.example
